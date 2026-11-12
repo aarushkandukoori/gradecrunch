@@ -10,6 +10,9 @@ import type { ItemStatus, SyncedCourse, SyncedItem, SyncPayload } from '../types
 import { GRADESCOPE_ORIGIN } from '../lib/brand'
 import { parseCourseNumbers } from '../lib/courseNumber'
 
+/** Pause between course pages. Gradescope's terms ask for human-like request rates, so one page a second. */
+export const GRADESCOPE_PAUSE_MS = 1000
+
 /** One course box from the Gradescope home page. */
 export interface GsCourseRef {
   id: string
@@ -261,6 +264,7 @@ class LoggedOutError extends Error {}
 export async function syncGradescope(
   fetchText: (path: string) => Promise<string>,
   onProgress?: (msg: string) => void,
+  pauseMs = GRADESCOPE_PAUSE_MS, // tests pass 0
 ): Promise<SyncPayload> {
   const progress = onProgress ?? (() => {})
   progress('Gradescope: reading your course list')
@@ -277,7 +281,7 @@ export async function syncGradescope(
 
   // One course page at a time with a short pause: Gradescope's terms ask for human-like request rates.
   const results = await mapLimit(refs, 1, async (ref, i): Promise<SyncedCourse | null> => {
-    if (i > 0) await new Promise((resolve) => setTimeout(resolve, 300))
+    if (i > 0 && pauseMs > 0) await new Promise((resolve) => setTimeout(resolve, pauseMs))
     try {
       const html = await fetchText(`/courses/${ref.id}`)
       if (!isCoursePage(html)) {

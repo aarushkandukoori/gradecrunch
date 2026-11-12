@@ -217,7 +217,7 @@ describe('syncGradescope', () => {
     const { fetchText, calls } = fakeFetch(pages)
     const progress: string[] = []
 
-    const payload = await syncGradescope(fetchText, (m) => progress.push(m))
+    const payload = await syncGradescope(fetchText, (m) => progress.push(m), 0)
 
     expect(payload.v).toBe(1)
     expect(payload.kind).toBe('gradescope')
@@ -249,20 +249,20 @@ describe('syncGradescope', () => {
   test('passes cross-listed numbers through as alsoNumbers', async () => {
     const home = '<div class="courseList"><a class="courseBox" href="/courses/8"><h3 class="courseBox--shortname">15-213/18-213</h3></a></div>'
     const { fetchText } = fakeFetch({ '/': home, '/courses/8': COURSE })
-    const payload = await syncGradescope(fetchText)
+    const payload = await syncGradescope(fetchText, undefined, 0)
     expect(payload.courses[0]).toMatchObject({ number: '15213', alsoNumbers: ['18213'] })
   })
 
   test('falls back to the course page term when the list has none', async () => {
     const home = '<div class="courseList"><a class="courseBox" href="/courses/7"><h3 class="courseBox--shortname">36225</h3></a></div>'
     const { fetchText } = fakeFetch({ '/': home, '/courses/7': COURSE })
-    const payload = await syncGradescope(fetchText)
+    const payload = await syncGradescope(fetchText, undefined, 0)
     expect(payload.courses[0]).toMatchObject({ term: 'Fall 2026', number: '36225', title: '36225' })
   })
 
   test('a failing course becomes a warning and a failed id, the rest still sync', async () => {
     const { fetchText } = fakeFetch({ '/': HOME_TA, '/courses/1000002': COURSE, '/courses/1000007': new Error('HTTP 500') })
-    const payload = await syncGradescope(fetchText)
+    const payload = await syncGradescope(fetchText, undefined, 0)
     expect(payload.courses.map((c) => c.sourceId)).toEqual(['1000002'])
     expect(payload.warnings).toEqual(["Gradescope: couldn't read 36202 (HTTP 500)"])
     expect(payload.failedIds).toEqual(['1000007']) // the app keeps its stored copy of this course
@@ -271,7 +271,7 @@ describe('syncGradescope', () => {
   test('a page that is not a course page is a failed course, not an empty one', async () => {
     // e.g. Gradescope sent its home page instead of the course
     const { fetchText } = fakeFetch({ '/': HOME_TA, '/courses/1000002': COURSE, '/courses/1000007': HOME_TA })
-    const payload = await syncGradescope(fetchText)
+    const payload = await syncGradescope(fetchText, undefined, 0)
     expect(payload.courses.map((c) => c.sourceId)).toEqual(['1000002'])
     expect(payload.failedIds).toEqual(['1000007'])
     expect(payload.warnings[0]).toMatch(/couldn't read 36202/)
@@ -280,17 +280,17 @@ describe('syncGradescope', () => {
   test('getting logged out mid-sync stops the whole sync', async () => {
     const login = '<html><body><form action="/login" method="post"><input name="session[email]"><input type="password" name="session[password]"></form></body></html>'
     const { fetchText } = fakeFetch({ '/': HOME_TA, '/courses/1000002': COURSE, '/courses/1000007': login })
-    await expect(syncGradescope(fetchText)).rejects.toThrow('Log in to Gradescope first')
+    await expect(syncGradescope(fetchText, undefined, 0)).rejects.toThrow('Log in to Gradescope first')
   })
 
   test('throws a clear error when logged out', async () => {
     const { fetchText } = fakeFetch({ '/': '<html><body><a href="/login">Log In</a></body></html>' })
-    await expect(syncGradescope(fetchText)).rejects.toThrow('Log in to Gradescope first')
+    await expect(syncGradescope(fetchText, undefined, 0)).rejects.toThrow('Log in to Gradescope first')
   })
 
   test('a logged-in account with no courses gives an empty payload', async () => {
     const { fetchText } = fakeFetch({ '/': '<div class="courseList"></div>' })
-    const payload = await syncGradescope(fetchText)
+    const payload = await syncGradescope(fetchText, undefined, 0)
     expect(payload.courses).toEqual([])
     expect(payload.warnings).toEqual([])
   })
@@ -309,7 +309,7 @@ describe('syncGradescope', () => {
       running--
       return COURSE
     }
-    const payload = await syncGradescope(fetchText)
+    const payload = await syncGradescope(fetchText, undefined, 0)
     expect(payload.courses).toHaveLength(7)
     expect(peak).toBe(1)
   })
