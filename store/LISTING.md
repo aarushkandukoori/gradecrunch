@@ -12,7 +12,7 @@ no localhost access). Images are in this folder.
 ## Store listing tab
 
 - **Name** (from the manifest): GradeCrunch: Grades and QPA
-- **Summary** (manifest description, max 132): See all your grades and your QPA in one place. Reads your own Canvas, Gradescope and Autolab grades in your browser; nothing is sent to a server.
+- **Summary** (manifest description, max 132): All your grades and QPA in one place. Reads your Canvas, Gradescope and Autolab grades in your browser. Nothing goes to a server.
 - **Category:** Education
 - **Language:** English
 - **Description:**
