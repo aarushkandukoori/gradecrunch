@@ -70,6 +70,7 @@ export interface SyncPayload {
   at: string // ISO time
   courses: SyncedCourse[]
   warnings: string[] // human-readable problems that did not stop the sync
+  failedIds?: string[] // sourceIds of courses whose details could not be read: keep the previously stored copy
 }
 
 // ---------------------------------------------------------------- user preferences
@@ -92,6 +93,8 @@ export interface CoursePrefs {
   weights?: Record<string, number> // categoryKey -> weight percent
   cutoffs?: GradeCut[] // custom letter cutoffs for this course
   whatIf?: Record<string, number> // itemKey -> hypothetical score (points)
+  whatIfGraded?: string[] // itemKeys whose what-if was typed over an existing real score (keep it after re-syncs);
+  //                         any other what-if stops applying once the item gets a real score
   moved?: Record<string, string> // itemKey -> categoryKey (re-categorized by the student)
   ignored?: string[] // itemKeys excluded from the grade
   included?: string[] // itemKeys we skipped automatically that the student wants counted anyway
@@ -155,6 +158,7 @@ export interface Item {
   otherScore: number | null // the other site's score when two sites disagree (e.g. Canvas vs Gradescope)
   otherSource?: Source // which site otherScore came from
   skipReason?: string // set when we left it out automatically (e.g. an alternate exam you didn't take)
+  aliases?: string[] // other keys this same assignment had before (e.g. its Gradescope key before Canvas posted it)
   planned: boolean // a ManualItem the student added
 }
 
@@ -211,9 +215,10 @@ export interface NeededResult {
   letter: string
   min: number // the cutoff percent
   needed: number | null // average percent needed on all remaining work; null when nothing remains
-  status: 'locked' | 'guaranteed' | 'possible' | 'impossible'
+  status: 'locked' | 'guaranteed' | 'possible' | 'impossible' | 'unknown'
   // locked: no remaining work, you have it / guaranteed: even 0% on the rest gets it
   // possible: need `needed`% on the rest / impossible: even 100% on the rest misses it
+  // unknown: work is still to come but its point values are not known yet (Gradescope hides them until graded)
 }
 
 export interface QpaRow {
