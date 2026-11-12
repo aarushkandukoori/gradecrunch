@@ -20,6 +20,8 @@ export function Modal({ open, onClose, title, children }: Props) {
     if (open && !d.open) {
       if (typeof d.showModal === 'function') d.showModal()
       else d.setAttribute('open', '')
+      // Start in the first field when the content marks one (otherwise the browser picks the Close button).
+      d.querySelector<HTMLElement>('[data-autofocus]')?.focus()
     } else if (!open && d.open) {
       if (typeof d.close === 'function') d.close()
       else d.removeAttribute('open')

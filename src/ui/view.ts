@@ -243,3 +243,52 @@ export function placeholderOnlyCategories(course: Course): Set<string> {
   }
   return hide
 }
+
+// ---------------------------------------------------------------- simple class list and class page
+
+/**
+ * One line of "What you need", said after the letter: "A: 74% average on what's left", "B: Guaranteed".
+ * Same meaning as neededText, in fewer words.
+ */
+export function neededLine(n: NeededResult, percent: number | null): string {
+  if (n.status === 'possible' && n.needed != null) return `${Number(n.needed.toFixed(1))}% average on what's left`
+  return neededText(n, percent)
+}
+
+/**
+ * The short muted hint under a class in the list, or null when there is nothing worth saying.
+ * `letter` is the letter the row shows, so a student who already has an A reads "to keep the A".
+ * `whatIf` is true when the percent includes made-up scores.
+ */
+export function rowHint(
+  course: Course,
+  needed: NeededResult[],
+  grade: GradeResult | undefined,
+  letter: string | null = null,
+  whatIf = false,
+): string | null {
+  if (course.prefs.passFail) return 'Pass/fail'
+  if (course.prefs.hidden) return 'Hidden'
+  if (whatIf) return 'Includes what-if scores'
+  // "Point values aren't posted yet" is true for most Gradescope classes mid-semester: not worth a line.
+  if (needed.length > 0 && needed.every((n) => n.status === 'unknown')) return null
+  const best = needed.find((n) => n.status !== 'impossible')
+  if (best && best.status === 'possible' && best.needed != null && letter === best.letter) {
+    return `Need ${best.needed.toFixed(1)}% on the rest to keep the ${best.letter}`
+  }
+  return courseInsight(needed, grade)
+}
+
+const SOURCE_LABELS: Record<Course['sources'][number]['source'], string> = {
+  canvas: 'Canvas',
+  gradescope: 'Gradescope',
+  autolab: 'Autolab',
+  manual: 'you',
+}
+
+/** "From Canvas + Gradescope", or "Added by hand" for a class typed in by hand. */
+export function sourceText(course: Course): string {
+  if (course.sources.length === 0 || isManualOnly(course)) return 'Added by hand'
+  const names = [...new Set(course.sources.filter((s) => s.source !== 'manual').map((s) => SOURCE_LABELS[s.source]))]
+  return `From ${names.join(' + ')}`
+}

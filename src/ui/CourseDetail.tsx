@@ -1,16 +1,16 @@
-// The expanded part of a course card: "What you need", the categories table (edit weights), every assignment
-// (what-ifs, move, ignore, planned items) and the course settings (units, final letter, pass/fail, cutoffs, hide).
+// The body of a class page: "What you need", every assignment grouped by category (what-ifs behind a switch,
+// move, ignore) and, folded away under "Edit this class", the class settings: weights, units, final letter,
+// pass/fail, hide, letter cutoffs, planned items and remove.
 import { useState, type FormEvent } from 'react'
-import { courseLabel, dropRuleText, formatPercent, formatPoints } from '../lib/format'
+import { courseLabel, dropRuleText, formatPercent } from '../lib/format'
 import { isCountable } from '../lib/grade'
 import { randomId, withCutoff, withPlanned, withWeight } from '../lib/store'
-import { whatIfApplies, withoutWhatIfs } from '../lib/whatIfs'
+import { activeWhatIfs, whatIfApplies, withoutWhatIfs } from '../lib/whatIfs'
 import type { Course, CoursePrefs, GradeCut, GradeResult, Level, NeededResult } from '../types'
 import { ItemRow } from './ItemRow'
-import { LetterChip } from './LetterChip'
 import { NumberField } from './NumberField'
 import { PlusIcon, TrashIcon } from './icons'
-import { collapseScheme, groupItems, isZeroPointPlaceholder, neededText, placeholderOnlyCategories } from './view'
+import { collapseScheme, groupItems, isZeroPointPlaceholder, neededLine, placeholderOnlyCategories, weightSum } from './view'
 
 interface Props {
   course: Course
@@ -28,45 +28,43 @@ export function CourseDetail({ course, grade, needed, level, onPrefs, onRemove }
   const ignored = new Set(prefs.ignored ?? [])
   // Any saved what-if, even one that no longer applies (its item got a real score), so it can still be cleared.
   const hasWhatIf = Object.keys(prefs.whatIf ?? {}).length > 0
+  const whatIfCount = activeWhatIfs(course).length
+  // The switch starts on when this class already has what-ifs, so the student can see them.
+  const [whatIfMode, setWhatIfMode] = useState(hasWhatIf)
   // Remaining items with no point values yet. When other remaining work has points, "what you need" is computed
   // from that part only, so say so.
   const unknownMax = course.items.filter((i) => i.score === null && i.max === null && isCountable(i, ignored)).length
   const someKnown = needed.some((n) => n.status !== 'unknown' && n.status !== 'locked')
-  const hasCanvas = course.sources.some((s) => s.source === 'canvas')
   const included = new Set(prefs.included ?? [])
   // Zero-point placeholders (lecture notes, attendance) are hidden until the student asks to see them.
   const [showPlaceholders, setShowPlaceholders] = useState(false)
   const hiddenCats = showPlaceholders ? new Set<string>() : placeholderOnlyCategories(course)
   const placeholderCount = course.items.filter((i) => isZeroPointPlaceholder(i, prefs.whatIf)).length
-  const visibleCategories = course.categories.filter((c) => !hiddenCats.has(c.key))
+  const groups = groupItems(course)
+    .filter((g) => !hiddenCats.has(g.key))
+    .map((g) => ({
+      ...g,
+      items: showPlaceholders ? g.items : g.items.filter((i) => !isZeroPointPlaceholder(i, prefs.whatIf)),
+    }))
+
+  function toggleWhatIf(on: boolean) {
+    setWhatIfMode(on)
+    // Off means "show my real grade": drop the made-up scores.
+    if (!on && hasWhatIf) onPrefs(withoutWhatIfs)
+  }
 
   return (
     <div className="detail">
       {needed.length > 0 && (
-        <section className="detail-section">
-          <h4>What you need</h4>
-          <table className="table needed-table">
-            <thead>
-              <tr>
-                <th scope="col">Letter</th>
-                <th scope="col">Cutoff</th>
-                <th scope="col">On the rest of the semester</th>
-              </tr>
-            </thead>
-            <tbody>
-              {needed.map((n) => (
-                <tr key={n.letter} className={`needed-${n.status}`}>
-                  <td data-label="Letter">
-                    <LetterChip letter={n.letter} size="sm" />
-                  </td>
-                  <td data-label="Cutoff" className="num">
-                    {formatPoints(n.min)}%
-                  </td>
-                  <td data-label="Need">{neededText(n, grade.percent)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        <section className="detail-section" aria-labelledby="need-title">
+          <h2 id="need-title">What you need</h2>
+          <ul className="needed-list">
+            {needed.map((n) => (
+              <li key={n.letter} className={`needed-${n.status}`}>
+                <strong>{n.letter}:</strong> {neededLine(n, grade.percent)}
+              </li>
+            ))}
+          </ul>
           {unknownMax > 0 && someKnown && (
             <p className="muted small">
               Leaves out {unknownMax === 1 ? '1 item' : `${unknownMax} items`} whose point values aren't posted yet.
@@ -75,138 +73,154 @@ export function CourseDetail({ course, grade, needed, level, onPrefs, onRemove }
         </section>
       )}
 
-      {visibleCategories.length > 0 && (
-        <section className="detail-section">
-          <div className="section-head">
-            <h4>Categories</h4>
-            <label className="check">
-              <input
-                type="checkbox"
-                checked={course.weighted}
-                onChange={(e) => onPrefs((p) => ({ ...p, weighted: e.target.checked }))}
-              />
-              Use category weights
-            </label>
-            {prefs.weights && (
-              <button
-                type="button"
-                className="link-btn"
-                // Typing a weight also turned weighting on, so undo both: back to exactly what the site uses.
-                onClick={() => onPrefs((p) => ({ ...p, weights: undefined, weighted: undefined }))}
-              >
-                Reset to {hasCanvas ? 'Canvas' : 'original'} weights
-              </button>
-            )}
-          </div>
-          <table className="table cat-table">
-            <thead>
-              <tr>
-                <th scope="col">Category</th>
-                <th scope="col">Weight</th>
-                <th scope="col">Score</th>
-                <th scope="col">Points</th>
-              </tr>
-            </thead>
-            <tbody>
-              {visibleCategories.map((cat) => {
-                const r = results.get(cat.key)
-                const rule = dropRuleText(cat)
-                return (
-                  <tr key={cat.key} className={r && !r.counted ? 'is-muted' : ''}>
-                    <td data-label="Category">
-                      <span className="cat-name">{cat.name}</span>
-                      {rule && <span className="muted small"> · {rule}</span>}
-                    </td>
-                    <td data-label="Weight">
-                      <NumberField
-                        label={`Weight for ${cat.name}`}
-                        hideLabel
-                        className="weight-field"
-                        suffix="%"
-                        min={0}
-                        max={100}
-                        placeholder={course.weighted ? '0' : '-'}
-                        value={cat.weight}
-                        onCommit={(v) => onPrefs((p) => withWeight(p, cat.key, v))}
-                      />
-                    </td>
-                    <td data-label="Score" className="num">
-                      {r && r.percent != null ? formatPercent(r.percent) : <span className="muted">Nothing graded</span>}
-                    </td>
-                    <td data-label="Points" className="num muted">
-                      {r && r.possible > 0 ? `${formatPoints(r.earned)} / ${formatPoints(r.possible)}` : ''}
-                    </td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
-        </section>
-      )}
-
       {(course.items.length > 0 || course.categories.length > 0) && (
-        <section className="detail-section">
+        <section className="detail-section" aria-labelledby="items-title">
           <div className="section-head">
-            <h4>Assignments</h4>
-            {placeholderCount > 0 && (
-              <button type="button" className="link-btn" onClick={() => setShowPlaceholders(!showPlaceholders)}>
-                {showPlaceholders ? 'Hide' : 'Show'} {placeholderCount} zero-point {placeholderCount === 1 ? 'item' : 'items'}
-              </button>
-            )}
-            {hasWhatIf && (
-              <button type="button" className="link-btn" onClick={() => onPrefs(withoutWhatIfs)}>
-                Clear what-ifs
-              </button>
+            <h2 id="items-title">Assignments</h2>
+            {course.items.length > 0 && (
+              <label className="switch">
+                <input
+                  type="checkbox"
+                  role="switch"
+                  checked={whatIfMode}
+                  onChange={(e) => toggleWhatIf(e.target.checked)}
+                />
+                <span className="switch-track" aria-hidden="true" />
+                Try what-if scores
+              </label>
             )}
           </div>
-          {groupItems(course)
-            .filter((g) => !hiddenCats.has(g.key))
-            .map((g) => ({
-              ...g,
-              items: showPlaceholders ? g.items : g.items.filter((i) => !isZeroPointPlaceholder(i, prefs.whatIf)),
-            }))
-            .map((g) => (
-            <div key={g.key} className="item-group">
-              <h5>{g.name}</h5>
-              {g.items.length > 0 ? (
-                <ul className="items">
-                  {g.items.map((item) => (
-                    <ItemRow
-                      key={item.key}
-                      item={item}
-                      categories={course.categories}
-                      whatIf={whatIfApplies(item, prefs) ? prefs.whatIf?.[item.key] : undefined}
-                      ignored={ignored.has(item.key)}
-                      included={included.has(item.key)}
-                      dropped={dropped.has(item.key)}
-                      onPrefs={onPrefs}
-                    />
-                  ))}
-                </ul>
-              ) : (
-                <p className="muted small">Nothing here yet.</p>
+          {whatIfMode && (
+            <p className="note-whatif">
+              {whatIfCount > 0
+                ? `Includes ${whatIfCount === 1 ? '1 what-if score' : `${whatIfCount} what-if scores`}, not your real grade. `
+                : 'Type a score next to any assignment to see what it does to your grade. '}
+              {hasWhatIf && (
+                <button type="button" className="link-btn" onClick={() => onPrefs(withoutWhatIfs)}>
+                  Clear what-ifs
+                </button>
               )}
-              {g.key !== '__other' && <AddPlanned categoryKey={g.key} categoryName={g.name} onPrefs={onPrefs} />}
-            </div>
-          ))}
+            </p>
+          )}
+
+          {groups.map((g) => {
+            const r = results.get(g.key)
+            const cat = course.categories.find((c) => c.key === g.key)
+            const meta: string[] = []
+            if (course.weighted && cat?.weight != null) meta.push(`${Math.round(cat.weight * 100) / 100}% of grade`)
+            if (r && r.percent != null) meta.push(formatPercent(r.percent))
+            const rule = cat ? dropRuleText(cat) : ''
+            if (rule) meta.push(rule)
+            return (
+              <div key={g.key} className={`item-group ${r && !r.counted ? 'is-muted' : ''}`}>
+                <h3>
+                  {g.name}
+                  {meta.length > 0 && <span className="group-meta"> · {meta.join(' · ')}</span>}
+                </h3>
+                {g.items.length > 0 ? (
+                  <ul className="items">
+                    {g.items.map((item) => (
+                      <ItemRow
+                        key={item.key}
+                        item={item}
+                        categories={course.categories}
+                        whatIf={whatIfApplies(item, prefs) ? prefs.whatIf?.[item.key] : undefined}
+                        ignored={ignored.has(item.key)}
+                        included={included.has(item.key)}
+                        dropped={dropped.has(item.key)}
+                        whatIfMode={whatIfMode}
+                        onPrefs={onPrefs}
+                      />
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="muted small">Nothing here yet.</p>
+                )}
+              </div>
+            )
+          })}
+          {placeholderCount > 0 && (
+            <button type="button" className="link-btn" onClick={() => setShowPlaceholders(!showPlaceholders)}>
+              {showPlaceholders ? 'Hide' : 'Show'} {placeholderCount} zero-point {placeholderCount === 1 ? 'item' : 'items'}
+            </button>
+          )}
         </section>
       )}
 
-      <CourseSettings course={course} level={level} onPrefs={onPrefs} onRemove={onRemove} />
+      <details className="edit-class">
+        <summary>Edit this class</summary>
+        <div className="edit-body">
+          {course.categories.length > 0 && <Weights course={course} onPrefs={onPrefs} />}
+          <CourseSettings course={course} level={level} onPrefs={onPrefs} onRemove={onRemove} />
+        </div>
+      </details>
     </div>
   )
 }
 
-/** "Add planned item": a future assignment you know is coming (name + max points), to plan what-ifs around it. */
-function AddPlanned({ categoryKey, categoryName, onPrefs }: { categoryKey: string; categoryName: string; onPrefs: Props['onPrefs'] }) {
+/** Category weights from the syllabus, and the switch between weights and plain total points. */
+function Weights({ course, onPrefs }: Pick<Props, 'course' | 'onPrefs'>) {
+  const hasCanvas = course.sources.some((s) => s.source === 'canvas')
+  const sum = weightSum(course)
+  return (
+    <section className="edit-section" aria-labelledby="weights-title">
+      <div className="section-head">
+        <h3 id="weights-title">Weights</h3>
+        <label className="check">
+          <input
+            type="checkbox"
+            checked={course.weighted}
+            onChange={(e) => onPrefs((p) => ({ ...p, weighted: e.target.checked }))}
+          />
+          Use weights
+        </label>
+      </div>
+      <p className="muted small">
+        {course.weighted ? 'Each category counts for its share of the grade.' : 'Using total points. Type the syllabus weights to switch.'}
+      </p>
+      <div className="weight-grid">
+        {course.categories.map((cat) => (
+          <NumberField
+            key={cat.key}
+            label={cat.name}
+            className="weight-field"
+            suffix="%"
+            min={0}
+            max={100}
+            placeholder={course.weighted ? '0' : '-'}
+            value={cat.weight}
+            onCommit={(v) => onPrefs((p) => withWeight(p, cat.key, v))}
+          />
+        ))}
+      </div>
+      {course.weighted && Math.abs(sum - 100) > 0.01 && (
+        <p className="note-warn small">Weights add up to {Math.round(sum * 100) / 100}%</p>
+      )}
+      {course.prefs.weights && (
+        <button
+          type="button"
+          className="link-btn"
+          // Typing a weight also turned weighting on, so undo both: back to exactly what the site uses.
+          onClick={() => onPrefs((p) => ({ ...p, weights: undefined, weighted: undefined }))}
+        >
+          Reset to {hasCanvas ? 'Canvas' : 'original'} weights
+        </button>
+      )}
+    </section>
+  )
+}
+
+/** "Add a planned assignment": a future one you know is coming (name + max points), to plan what-ifs around it. */
+function AddPlanned({ course, onPrefs }: Pick<Props, 'course' | 'onPrefs'>) {
   const [open, setOpen] = useState(false)
   const [name, setName] = useState('')
   const [max, setMax] = useState('')
+  const [categoryKey, setCategoryKey] = useState(course.categories[0]?.key ?? '')
 
   function submit(e: FormEvent) {
     e.preventDefault()
     const points = Number(max)
-    if (!name.trim() || !Number.isFinite(points) || points <= 0) return
+    if (!name.trim() || !categoryKey || !Number.isFinite(points) || points <= 0) return
     onPrefs((p) => withPlanned(p, { key: `m:${randomId()}`, name: name.trim(), categoryKey, max: points }))
     setName('')
     setMax('')
@@ -216,7 +230,7 @@ function AddPlanned({ categoryKey, categoryName, onPrefs }: { categoryKey: strin
   if (!open) {
     return (
       <button type="button" className="link-btn add-planned" onClick={() => setOpen(true)}>
-        <PlusIcon size={14} /> Add planned item
+        <PlusIcon size={14} /> Add a planned assignment
       </button>
     )
   }
@@ -224,7 +238,17 @@ function AddPlanned({ categoryKey, categoryName, onPrefs }: { categoryKey: strin
     <form className="planned-form" onSubmit={submit}>
       <label className="field field-grow">
         <span>Name</span>
-        <input value={name} onChange={(e) => setName(e.target.value)} placeholder={`Next ${categoryName.toLowerCase()}`} autoFocus />
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Final exam" autoFocus />
+      </label>
+      <label className="field">
+        <span>Category</span>
+        <select value={categoryKey} onChange={(e) => setCategoryKey(e.target.value)}>
+          {course.categories.map((c) => (
+            <option key={c.key} value={c.key}>
+              {c.name}
+            </option>
+          ))}
+        </select>
       </label>
       <label className="field field-sm">
         <span>Max points</span>
@@ -245,9 +269,9 @@ const GRAD_LETTERS = ['A+', 'A', 'A-', 'B+', 'B', 'B-', 'C+', 'C', 'C-', 'D+', '
 const OTHER_LETTERS = ['P', 'N', 'W']
 
 const UNITS_HINT: Record<Course['unitsSource'], string> = {
-  catalog: 'catalog',
-  custom: 'set by you',
-  default: 'default 9 - check SIO',
+  catalog: 'From the CMU catalog',
+  custom: 'Set by you',
+  default: 'A guess. Check SIO',
 }
 
 const SCHEME_HINT: Record<Course['schemeSource'], string> = {
@@ -286,8 +310,8 @@ function CourseSettings({ course, level, onPrefs, onRemove }: Pick<Props, 'cours
   }
 
   return (
-    <section className="detail-section course-settings">
-      <h4>Course settings</h4>
+    <section className="edit-section course-settings" aria-labelledby="settings-title">
+      <h3 id="settings-title">Grade and units</h3>
       <div className="settings-row">
         <div>
           <NumberField
@@ -327,15 +351,15 @@ function CourseSettings({ course, level, onPrefs, onRemove }: Pick<Props, 'cours
             checked={prefs.hidden ?? false}
             onChange={(e) => onPrefs((p) => ({ ...p, hidden: e.target.checked || undefined }))}
           />
-          Hide this course
+          Hide this class
         </label>
       </div>
 
       {editableCuts.length > 0 && (
-        <details className="cutoffs">
-          <summary>
+        <div className="cutoffs">
+          <h3>
             Letter cutoffs <span className="muted small">({SCHEME_HINT[course.schemeSource]})</span>
-          </summary>
+          </h3>
           <div className="cutoff-grid">
             {editableCuts.map((c, i) => (
               <NumberField
@@ -356,8 +380,10 @@ function CourseSettings({ course, level, onPrefs, onRemove }: Pick<Props, 'cours
               Reset
             </button>
           )}
-        </details>
+        </div>
       )}
+
+      {course.categories.length > 0 && <AddPlanned course={course} onPrefs={onPrefs} />}
 
       {onRemove && (
         <button type="button" className="btn btn-danger-ghost btn-sm" onClick={remove}>

@@ -1,5 +1,5 @@
-// One assignment inside an expanded course: name, status, score, due date, a "what if" score box, and a small
-// menu to move it to another category or leave it out of the grade.
+// One assignment on the class page: name, score (or status), due date, and a small menu to move it to another
+// category or leave it out of the grade. With "Try what-if scores" on, it also gets a what-if score box.
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react'
 import { formatDue, formatPoints, formatScore, scorePercent, statusLabel } from '../lib/format'
 import { withIgnored, withIncluded, withMoved, withoutPlanned, withWhatIf } from '../lib/store'
@@ -14,12 +14,13 @@ interface Props {
   ignored: boolean
   included: boolean // the student chose to count an item we had skipped automatically
   dropped: boolean
+  whatIfMode: boolean // "Try what-if scores" is on: show the what-if box / pencil
   onPrefs: (change: (p: CoursePrefs) => CoursePrefs) => void
 }
 
 const SOURCE_TAG: Record<Item['source'], string> = { canvas: 'Canvas', gradescope: 'Gradescope', autolab: 'Autolab', manual: 'You' }
 
-export function ItemRow({ item, categories, whatIf, ignored, included, dropped, onPrefs }: Props) {
+export function ItemRow({ item, categories, whatIf, ignored, included, dropped, whatIfMode, onPrefs }: Props) {
   const [editing, setEditing] = useState(false)
   const pencilRef = useRef<HTMLButtonElement>(null)
   const refocusPencil = useRef(false) // after the what-if box closes, put focus back on the pencil
@@ -27,10 +28,12 @@ export function ItemRow({ item, categories, whatIf, ignored, included, dropped, 
   const remaining = item.score === null
   // With unknown points possible a what-if can't be turned into a percent (it would count as pure extra credit),
   // so those items get no what-if box until the site posts the points.
-  const canWhatIf = countable && item.max !== null
+  const canWhatIf = whatIfMode && countable && item.max !== null
   // Remaining work always gets a what-if box; graded work gets one after clicking the edit button.
   const showWhatIf = canWhatIf && (remaining || editing || whatIf !== undefined)
   const statusKey = item.planned ? 'planned' : item.status
+  // A graded score speaks for itself; any other status (missing, submitted, planned...) gets a small pill.
+  const showStatus = item.planned || item.status !== 'graded'
 
   // When the what-if box closes, the pencil button comes back. If focus was lost with the box (Escape or Enter),
   // give it to the pencil so keyboard users keep their place; if the student moved on to something else, leave it.
@@ -80,13 +83,14 @@ export function ItemRow({ item, categories, whatIf, ignored, included, dropped, 
             item.name
           )}
         </span>
-        <span className="item-tags">
-          <span className="tag">{SOURCE_TAG[item.source]}</span>
-          <span className={`pill pill-${statusKey}`}>{statusLabel(item.status, item.planned)}</span>
-          {dropped && <span className="pill pill-dropped">Dropped</span>}
-          {ignored && <span className="pill pill-ignored">Ignored</span>}
-          {item.omit && <span className="pill pill-ignored">Not counted</span>}
-        </span>
+        {(showStatus || dropped || ignored || item.omit) && (
+          <span className="item-tags">
+            {showStatus && <span className={`pill pill-${statusKey}`}>{statusLabel(item.status, item.planned)}</span>}
+            {dropped && <span className="pill pill-dropped">Dropped</span>}
+            {ignored && <span className="pill pill-ignored">Ignored</span>}
+            {item.omit && <span className="pill pill-ignored">Not counted</span>}
+          </span>
+        )}
         {item.skipReason && <span className="item-note muted small">{item.skipReason}</span>}
       </div>
 
@@ -97,7 +101,7 @@ export function ItemRow({ item, categories, whatIf, ignored, included, dropped, 
           </span>
         ) : item.max !== null ? (
           <span className="muted num">
-            {item.maxEstimated ? `~${formatPoints(item.max)} pts (estimated)` : `${formatPoints(item.max)} pts`}
+            {item.maxEstimated ? `~${formatPoints(item.max)} pts` : `${formatPoints(item.max)} pts`}
           </span>
         ) : (
           <span className="muted">Points unknown</span>
@@ -211,6 +215,7 @@ function RowMenu({ label, actions }: { label: string; actions: MenuAction[] }) {
         type="button"
         className="row-menu"
         aria-label={label}
+        title="More"
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={open ? menuId : undefined}
@@ -222,7 +227,7 @@ function RowMenu({ label, actions }: { label: string; actions: MenuAction[] }) {
           }
         }}
       >
-        More
+        <span aria-hidden="true">&#8943;</span>
       </button>
       {open && (
         <div id={menuId} ref={menuRef} className="row-menu-list" role="menu" aria-label={label} onKeyDown={onMenuKey}>

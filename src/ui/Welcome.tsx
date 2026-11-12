@@ -1,13 +1,13 @@
-// The home page before any grades exist: headline, the three setup steps, manual add and the
-// privacy promise. Also reused (without the headline) as the /setup page.
+// The home page before any grades exist: a headline, the one card that connects your grades, a demo link and a
+// privacy line. Also reused (with a different headline) as the /setup page.
+import { useState } from 'react'
 import { BOOKMARKLET_VERSION } from '../lib/bookmarklet'
-import { REPO_URL } from '../lib/brand'
 import type { ManualCourse } from '../types'
-import { ExternalLink, NavLink, type Navigate } from './Link'
-import { ManualCourseForm } from './ManualCourseForm'
-import { SetupSteps } from './SetupSteps'
+import { AddClassDialog } from './AddClassDialog'
+import { ConnectCard, ConnectTrouble } from './ConnectCard'
+import { ChevronIcon } from './icons'
+import { NavLink, type Navigate } from './Link'
 import type { PushToast } from './Toasts'
-import { LockIcon } from './icons'
 
 interface Props {
   mode: 'welcome' | 'setup'
@@ -16,62 +16,55 @@ interface Props {
   term: string | null
   onDemo: () => void
   onAddManual: (course: ManualCourse) => void
+  onBack?: () => void // on /setup once there are grades: a way back to them
 }
 
 export function Welcome(p: Props) {
+  const [adding, setAdding] = useState(false)
+
   return (
     <div className="welcome">
+      {p.mode === 'setup' && p.onBack && (
+        <button type="button" className="back-btn" onClick={p.onBack}>
+          <ChevronIcon size={16} className="back-chev" /> My grades
+        </button>
+      )}
       {p.mode === 'welcome' ? (
         <section className="hero">
-          <h1>All your CMU grades and your QPA, in one place.</h1>
-          <p className="lead">
-            Pulls your scores from Canvas and Gradescope, fixes the weights, and tells you what you need on the rest of
-            the semester. Runs entirely in your browser.
-          </p>
-          <p className="hero-actions">
-            <button type="button" className="btn btn-secondary" onClick={p.onDemo}>
-              See a demo with sample grades
-            </button>
-          </p>
+          <h1>All your CMU grades in one place.</h1>
+          <p className="lead">Your Canvas and Gradescope scores, merged per class, with your QPA.</p>
         </section>
       ) : (
-        <section className="page-head">
-          <h1>Setup</h1>
-          <p className="lead">Two minutes, once. After that, one click on Canvas or Gradescope brings your grades here.</p>
+        <section className="hero">
+          <h1>Set up the Sync button</h1>
+          <p className="lead">Once. After that, one click on Canvas or Gradescope brings your grades here.</p>
         </section>
       )}
 
-      <SetupSteps toast={p.toast} />
+      <ConnectCard toast={p.toast} />
 
-      <details className="card disclosure">
-        <summary>Class graded somewhere else? Add it by hand</summary>
-        <div className="disclosure-body">
-          <ManualCourseForm term={p.term} onAdd={p.onAddManual} />
-        </div>
-      </details>
+      <div className="welcome-links">
+        {p.mode === 'welcome' && (
+          <button type="button" className="link-btn" onClick={p.onDemo}>
+            See a demo
+          </button>
+        )}
+        <button type="button" className="link-btn" onClick={() => setAdding(true)}>
+          Add a class by hand
+        </button>
+      </div>
 
-      {p.mode === 'setup' && <p className="muted small center">Your Sync button is version {BOOKMARKLET_VERSION}.</p>}
+      <ConnectTrouble toast={p.toast} />
 
-      <section className="privacy-strip" aria-label="Privacy">
-        <ul>
-          <li>
-            <LockIcon /> Nothing stored on a server
-          </li>
-          <li>
-            <LockIcon /> No passwords, ever
-          </li>
-          <li>
-            <LockIcon /> Open source
-          </li>
-        </ul>
-        <p>
-          <NavLink to="privacy" navigate={p.navigate}>
-            How your data is handled
-          </NavLink>
-          {' · '}
-          <ExternalLink href={REPO_URL}>Code on GitHub</ExternalLink>
-        </p>
-      </section>
+      <p className="privacy-line muted small">
+        Your grades stay in this browser. Nothing goes to a server.{' '}
+        <NavLink to="privacy" navigate={p.navigate}>
+          Privacy
+        </NavLink>
+        {p.mode === 'setup' && <> · Sync button version {BOOKMARKLET_VERSION}</>}
+      </p>
+
+      <AddClassDialog open={adding} onClose={() => setAdding(false)} term={p.term} onAdd={p.onAddManual} />
     </div>
   )
 }

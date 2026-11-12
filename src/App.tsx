@@ -1,5 +1,5 @@
 // The whole app. It owns the saved store, turns it into courses + grades + QPA, picks which page to show
-// (home / setup / privacy, mirrored in the URL), and handles syncing: the Sync bookmarklet opens this site at
+// (home / one class / setup / privacy, mirrored in the URL), and handles syncing: the Sync bookmarklet opens this site at
 // /#receive and hands the grades over by postMessage (see ui/receive.ts), or, when a popup blocker gets in the
 // way, sends them in a #sync= link that we read once on load. Every sync can be undone from its toast.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -31,16 +31,17 @@ import {
 } from './lib/store'
 import type { Course, CoursePrefs, ManualCourse, NeededResult, Settings, Store, SyncPayload } from './types'
 import { ClaudeDialog } from './ui/ClaudeDialog'
-import { Dashboard } from './ui/Dashboard'
+import { ClassView } from './ui/ClassView'
+import { Dashboard, type ReturnTo } from './ui/Dashboard'
 import { Footer } from './ui/Footer'
 import { Header } from './ui/Header'
-import { VIEW_PATHS, viewFromPath, type View } from './ui/Link'
+import { classKeyFromPath, classPath, VIEW_PATHS, viewFromPath, type View } from './ui/Link'
 import { PrivacyPage } from './ui/PrivacyPage'
 import { SettingsDialog } from './ui/SettingsDialog'
 import { Toasts, useToasts } from './ui/Toasts'
 import { Welcome } from './ui/Welcome'
 import { browserReceiverDeps, startReceiver, syncLinkIsStale } from './ui/receive'
-import { neededFor, pickTerm, splitCourses, termsWithGrades } from './ui/view'
+import { EMPTY_GRADE, isManualOnly, neededFor, pickTerm, splitCourses, termsWithGrades } from './ui/view'
 
 const CLAUDE_URL = 'https://claude.ai/new'
 const SOURCE_NAMES: Record<SyncPayload['kind'], string> = { canvas: 'Canvas', gradescope: 'Gradescope', autolab: 'Autolab' }
@@ -48,6 +49,10 @@ const SOURCE_NAMES: Record<SyncPayload['kind'], string> = { canvas: 'Canvas', gr
 export default function App() {
   const [store, setStore] = useState<Store>(loadStore)
   const [view, setView] = useState<View>(() => viewFromPath(window.location.pathname))
+  // The class open at /class/<key>, or null on any other page.
+  const [classKey, setClassKey] = useState<string | null>(() => classKeyFromPath(window.location.pathname))
+  // The list row (and scroll spot) to return to when leaving a class page.
+  const [returnTo, setReturnTo] = useState<ReturnTo | null>(null)
   const [theme, setThemeState] = useState<Theme>(getTheme)
   const [now, setNow] = useState(() => Date.now())
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -114,7 +119,14 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    const onPop = () => setView(viewFromPath(window.location.pathname))
+    // We put the scroll back ourselves (class page at the top, the list where it was).
+    if ('scrollRestoration' in window.history) window.history.scrollRestoration = 'manual'
+    const onPop = () => {
+      const key = classKeyFromPath(window.location.pathname)
+      setView(viewFromPath(window.location.pathname))
+      setClassKey(key)
+      if (key) window.scrollTo(0, 0)
+    }
     window.addEventListener('popstate', onPop)
     return () => window.removeEventListener('popstate', onPop)
   }, [])
@@ -122,6 +134,16 @@ export default function App() {
   const navigate = useCallback((next: View) => {
     if (window.location.pathname !== VIEW_PATHS[next]) window.history.pushState(null, '', VIEW_PATHS[next])
     setView(next)
+    setClassKey(null)
+    if (next !== 'home') setReturnTo(null)
+    window.scrollTo(0, 0)
+  }, [])
+
+  const openClass = useCallback((key: string) => {
+    setReturnTo({ key, scrollY: window.scrollY })
+    window.history.pushState(null, '', classPath(key))
+    setView('home')
+    setClassKey(key)
     window.scrollTo(0, 0)
   }, [])
 
@@ -153,6 +175,20 @@ export default function App() {
     [main, grades, store.settings, newestTerm],
   )
   const hasData = Object.keys(store.synced).length > 0 || store.manual.length > 0
+  const openCourse = classKey ? courses.find((c) => c.key === classKey) : undefined
+  const openNeeded = useMemo(() => {
+    if (!openCourse) return []
+    // A class from another term is not in `needed` (that only covers the classes on screen), so compute it here.
+    return needed.get(openCourse.key) ?? neededFor(openCourse, (c) => neededForLetters(c, c.prefs.whatIf ?? {}), store.settings.level)
+  }, [openCourse, needed, store.settings.level])
+
+  // A /class/ link to a class that isn't here (an old link, or it was just removed): show the class list instead.
+  useEffect(() => {
+    if (classKey && !openCourse) {
+      window.history.replaceState(null, '', VIEW_PATHS.home)
+      setClassKey(null)
+    }
+  }, [classKey, openCourse])
 
   // ------------------------------------------------------------ store updates
 
@@ -325,13 +361,34 @@ export default function App() {
         term={term}
         onAddManual={addManual}
         onDemo={startDemo}
+        onBack={hasData ? () => navigate('home') : undefined}
+      />
+    )
+  } else if (openCourse) {
+    const key = openCourse.key
+    page = (
+      <ClassView
+        course={openCourse}
+        grade={grades.get(key) ?? EMPTY_GRADE}
+        needed={openNeeded}
+        settings={store.settings}
+        qpaRow={qpa.rows.find((r) => r.courseKey === key)}
+        onBack={() => navigate('home')}
+        onPrefs={(change) => changePrefs(key, change)}
+        onRemove={
+          isManualOnly(openCourse)
+            ? () => {
+                removeManual(key)
+                navigate('home')
+              }
+            : undefined
+        }
       />
     )
   } else {
     page = (
       <Dashboard
         term={term}
-        newestTerm={newestTerm}
         main={main}
         other={other}
         grades={grades}
@@ -339,14 +396,13 @@ export default function App() {
         qpa={qpa}
         settings={store.settings}
         onSettings={changeSettings}
-        onPrefs={changePrefs}
+        onOpenClass={openClass}
         onAddManual={addManual}
-        onRemoveManual={removeManual}
         onAskClaude={askClaude}
-        onOpenSettings={() => setSettingsOpen(true)}
         demo={store.demo === true}
         onEndDemo={endDemo}
         onSetup={() => navigate('setup')}
+        returnTo={returnTo}
       />
     )
   }
@@ -379,6 +435,8 @@ export default function App() {
         onTheme={changeTheme}
         onImport={(s) => replaceWithUndo(() => s, 'Imported your data')}
         onDeleteAll={deleteAll}
+        qpa={qpa}
+        newestTerm={newestTerm}
       />
       <ClaudeDialog text={claudeText} onClose={() => setClaudeText(null)} />
       <Toasts toasts={toasts} onDismiss={dismiss} />

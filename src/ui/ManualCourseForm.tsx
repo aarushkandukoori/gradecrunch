@@ -37,7 +37,7 @@ export function ManualCourseForm({ term, onAdd }: Props) {
     <form className="manual-form" onSubmit={submit}>
       <label className="field">
         <span>Course number</span>
-        <input value={number} onChange={(e) => setNumber(e.target.value)} placeholder="15-213" autoComplete="off" />
+        <input value={number} onChange={(e) => setNumber(e.target.value)} placeholder="15-213" autoComplete="off" data-autofocus />
       </label>
       <label className="field field-grow">
         <span>Title (optional)</span>

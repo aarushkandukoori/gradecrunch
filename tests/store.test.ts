@@ -752,6 +752,7 @@ describe('<App />', () => {
 
   beforeEach(() => {
     ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
+    window.scrollTo = () => {} // jsdom has no scrolling; opening a class page scrolls to the top
     window.history.replaceState(null, '', '/')
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -770,32 +771,34 @@ describe('<App />', () => {
     })
   }
 
-  test('empty store shows the welcome hero and setup steps', async () => {
+  test('empty store shows the welcome page: one card with the Sync button and two steps', async () => {
     await renderApp()
-    expect(container.textContent).toContain('All your CMU grades and your QPA, in one place.')
-    expect(container.textContent).toContain('Add the Sync button')
-    expect(container.textContent).toContain('Class graded somewhere else? Add it by hand')
+    expect(container.textContent).toContain('All your CMU grades in one place.')
+    expect(container.querySelectorAll('.connect-steps li')).toHaveLength(2)
+    expect(container.textContent).toContain('Drag it to your bookmarks bar')
+    expect(container.textContent).toContain('See a demo')
+    expect(container.textContent).toContain('Trouble?')
     // The bookmarklet href is set after mount, as a javascript: URL pointing back at this origin.
     const link = container.querySelector('a.bookmarklet')
     expect(link?.getAttribute('href')?.startsWith('javascript:')).toBe(true)
     expect(decodeURIComponent(link!.getAttribute('href')!)).toContain(window.location.origin)
   })
 
-  test('a synced store shows the dashboard, QPA card and course card; the card expands', async () => {
+  test('a synced store shows the QPA and one row per class; a row opens the class page', async () => {
     const s = applyPayload(defaultStore(), payload('canvas', [syncedCanvas('1')]))
     saveStore(s)
     await renderApp()
     const text = container.textContent ?? ''
-    expect(text).toContain('Estimated semester QPA')
+    expect(text).toContain('Estimated QPA')
     expect(text).toContain('21-241')
     expect(text).toContain('84%')
     expect(text).not.toContain('84.0%')
-    expect(text).toContain('2 graded · 2 to go')
+    expect(text).not.toContain('Midterm 1') // assignments live on the class page
 
-    const head = container.querySelector<HTMLButtonElement>('button.course-head')!
-    expect(head.getAttribute('aria-expanded')).toBe('false')
-    await act(async () => head.click())
-    expect(head.getAttribute('aria-expanded')).toBe('true')
+    const row = container.querySelector<HTMLButtonElement>('button.class-row')!
+    expect(row.textContent).toContain('21-241')
+    await act(async () => row.click())
+    expect(window.location.pathname).toBe('/class/' + encodeURIComponent('Fall 2026|21241'))
     expect(container.textContent).toContain('What you need')
     expect(container.textContent).toContain('Midterm 1')
   })

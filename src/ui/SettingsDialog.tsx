@@ -1,10 +1,10 @@
-// Settings: level, college, theme, export / import / delete everything.
+// Settings: level, theme, QPA extras (college, cumulative QPA, Dean's List), export / import / delete everything.
 import { useState, type ChangeEvent } from 'react'
 import { APP_SLUG } from '../lib/brand'
-import { COLLEGES } from '../lib/cmu'
 import { exportStoreJson, parseStore, type Theme } from '../lib/store'
-import type { Settings, Store } from '../types'
+import type { QpaResult, Settings, Store } from '../types'
 import { Modal } from './Modal'
+import { QpaExtras } from './QpaExtras'
 import { TrashIcon, WarningIcon } from './icons'
 
 interface Props {
@@ -16,6 +16,8 @@ interface Props {
   onTheme: (t: Theme) => void
   onImport: (store: Store) => void
   onDeleteAll: () => void
+  qpa: QpaResult
+  newestTerm: boolean
 }
 
 const THEMES: { value: Theme; label: string }[] = [
@@ -77,18 +79,6 @@ export function SettingsDialog(p: Props) {
           <p className="muted small">Undergrad final grades have no plus or minus. Grad grades do (A- = 3.67).</p>
         </fieldset>
 
-        <label className="field">
-          <span>College (for Dean's List)</span>
-          <select value={s.college ?? ''} onChange={(e) => p.onSettings({ college: e.target.value || null })}>
-            <option value="">Not set</option>
-            {COLLEGES.map((c) => (
-              <option key={c.key} value={c.key}>
-                {c.name}
-              </option>
-            ))}
-          </select>
-        </label>
-
         <fieldset className="seg-field">
           <legend>Theme</legend>
           <div className="seg">
@@ -100,6 +90,8 @@ export function SettingsDialog(p: Props) {
             ))}
           </div>
         </fieldset>
+
+        <QpaExtras qpa={p.qpa} settings={s} onSettings={p.onSettings} newestTerm={p.newestTerm} />
 
         <div className="settings-block">
           <h3>Your data</h3>

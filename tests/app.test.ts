@@ -1,6 +1,7 @@
 // Tests for the app shell and UI fixes: syncing between tabs, Undo after a sync, old #sync links, the
 // postMessage receiver, what-if labels, the item row (what-if box, pencil focus, More menu), the course detail
-// (weights reset, cutoffs, final letter, remove), toasts, the phone sync line, and the Ask Claude text.
+// (weights reset, cutoffs, final letter, remove), the class page routing (/class/<key>), toasts, the Sync
+// popover, QPA extras in Settings, and the Ask Claude text.
 // All data is synthetic.
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { act, createElement } from 'react'
@@ -14,13 +15,15 @@ import { ItemRow } from '../src/ui/ItemRow'
 import { CourseDetail } from '../src/ui/CourseDetail'
 import { Toasts, type Toast } from '../src/ui/Toasts'
 import { Header } from '../src/ui/Header'
-import { QpaCard } from '../src/ui/QpaCard'
+import { QpaExtras } from '../src/ui/QpaExtras'
+import { rowHint } from '../src/ui/view'
 import type {
   Category,
   Course,
   CoursePrefs,
   GradeResult,
   Item,
+  NeededResult,
   QpaResult,
   Settings,
   Store,
@@ -64,6 +67,7 @@ let root: Root | null = null
 
 beforeEach(() => {
   ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
+  window.scrollTo = () => {} // jsdom has no scrolling; opening a class page scrolls to the top
   localStorage.clear()
   window.history.replaceState(null, '', '/')
   container = document.createElement('div')
@@ -227,10 +231,10 @@ describe('another tab saving', () => {
     other.prefs['Fall 2026|15122'] = { hidden: true }
     localStorage.setItem(STORE_KEY, JSON.stringify(other))
     await act(async () => window.dispatchEvent(new StorageEvent('storage', { key: STORE_KEY })))
-    expect(text()).toContain('Show 1 hidden course')
+    expect(text()).toContain('Show 1 hidden class')
 
     // Any change in this tab now saves the merged data, not the old snapshot.
-    await act(async () => buttonByText('Show 1 hidden course').click())
+    await act(async () => buttonByText('Show 1 hidden class').click())
     const saved = savedStore()
     expect(Object.keys(saved.synced).sort()).toEqual(['canvas:1', 'gradescope:9'])
     expect(saved.settings.showAll).toBe(true)
@@ -252,7 +256,7 @@ describe('another tab saving', () => {
     await renderApp()
     localStorage.removeItem(STORE_KEY)
     await act(async () => window.dispatchEvent(new StorageEvent('storage', { key: STORE_KEY })))
-    expect(text()).toContain('All your CMU grades and your QPA, in one place.')
+    expect(text()).toContain('All your CMU grades in one place.')
   })
 })
 
@@ -471,27 +475,40 @@ describe('what-ifs are labeled', () => {
     expect(withoutWhatIfs(prefs)).toEqual({ ignored: ['e'], whatIf: undefined, whatIfGraded: undefined })
   })
 
-  test('card badge, QPA note and Clear what-ifs on the dashboard', async () => {
+  test('QPA line, what-if note on the class page, and Clear what-ifs', async () => {
     const s = applyPayload(defaultStore(), payload([syncedCanvas('1')]))
     s.prefs['Fall 2026|21241'] = { whatIf: { 'c:12': 10 } }
     saveStore(s)
     await renderApp()
-    expect(container.querySelector('.badge-whatif')?.textContent).toBe('What-if')
+    expect(text()).toContain('includes what-if scores')
+
+    await act(async () => container.querySelector<HTMLButtonElement>('button.class-row')!.click())
+    // The switch starts on because this class already has a what-if.
+    expect(container.querySelector<HTMLInputElement>('input[role="switch"]')!.checked).toBe(true)
     expect(text()).toContain('Includes 1 what-if score, not your real grade.')
-    expect(text()).toContain('Includes what-if scores in 21-241.')
 
     await act(async () => buttonByText('Clear what-ifs').click())
-    expect(container.querySelector('.badge-whatif')).toBeNull()
-    expect(text()).not.toContain('Includes what-if scores')
+    expect(text()).not.toContain('Includes 1 what-if score')
     expect(savedStore().prefs['Fall 2026|21241']).toBeUndefined()
   })
 
-  test('a what-if left on an item that now has a real score shows no badge', async () => {
+  test('turning the what-if switch off clears the what-ifs', async () => {
+    const s = applyPayload(defaultStore(), payload([syncedCanvas('1')]))
+    s.prefs['Fall 2026|21241'] = { whatIf: { 'c:12': 10 } }
+    saveStore(s)
+    window.history.replaceState(null, '', '/class/' + encodeURIComponent('Fall 2026|21241'))
+    await renderApp()
+    await act(async () => container.querySelector<HTMLInputElement>('input[role="switch"]')!.click())
+    expect(savedStore().prefs['Fall 2026|21241']).toBeUndefined()
+    expect(container.querySelector('.whatif input')).toBeNull()
+  })
+
+  test('a what-if left on an item that now has a real score is not counted', async () => {
     const s = applyPayload(defaultStore(), payload([syncedCanvas('1')]))
     s.prefs['Fall 2026|21241'] = { whatIf: { 'c:11': 2 } } // HW1 is graded 9/10
     saveStore(s)
     await renderApp()
-    expect(container.querySelector('.badge-whatif')).toBeNull()
+    expect(text()).not.toContain('includes what-if scores')
   })
 
   test('Ask Claude text marks what-ifs and unknown point values', () => {
@@ -517,7 +534,10 @@ describe('what-ifs are labeled', () => {
 // ---------------------------------------------------------------- item row
 
 describe('<ItemRow />', () => {
-  function row(it: Item, extra: { whatIf?: number; onPrefs?: (change: (p: CoursePrefs) => CoursePrefs) => void } = {}) {
+  function row(
+    it: Item,
+    extra: { whatIf?: number; whatIfMode?: boolean; onPrefs?: (change: (p: CoursePrefs) => CoursePrefs) => void } = {},
+  ) {
     return createElement(
       'ul',
       null,
@@ -528,6 +548,7 @@ describe('<ItemRow />', () => {
         ignored: false,
         included: false,
         dropped: false,
+        whatIfMode: extra.whatIfMode ?? true,
         onPrefs: extra.onPrefs ?? (() => {}),
       }),
     )
@@ -542,6 +563,16 @@ describe('<ItemRow />', () => {
   test('remaining work with known points gets a what-if box', async () => {
     await render(row(item('hw')))
     expect(container.querySelector('input')).not.toBeNull()
+  })
+
+  test('with "Try what-if scores" off: no what-if box and no pencil, but the menu stays', async () => {
+    await render(row(item('hw')))
+    act(() => root!.unmount())
+    await render(row(item('hw', { score: 9, status: 'graded' }), { whatIfMode: false }))
+    expect(container.querySelector('input')).toBeNull()
+    expect(container.querySelector('button[aria-label^="Try a what-if"]')).toBeNull()
+    expect(container.querySelector('button[aria-haspopup="menu"]')).not.toBeNull()
+    expect(text()).not.toContain('Graded') // a graded score speaks for itself
   })
 
   test('pencil focuses the new box; Escape closes it and puts focus back on the pencil', async () => {
@@ -735,29 +766,213 @@ describe('<Toasts />', () => {
 
 // ---------------------------------------------------------------- header and QPA card
 
-describe('header and QPA card', () => {
-  test('the sync status also renders as its own line for phones', async () => {
-    await render(
-      createElement(Header, {
-        navigate: () => {},
-        showDashboard: true,
-        terms: ['Fall 2026'],
-        term: 'Fall 2026',
-        onTermChange: () => {},
-        lastSync: {},
-        now: Date.now(),
-        onOpenSettings: () => {},
-      }),
-    )
-    expect(container.querySelector('.sync-status-mobile')?.textContent).toBe('Canvas not synced · Gradescope not synced')
+describe('header and QPA extras', () => {
+  function header(terms: string[]) {
+    return createElement(Header, {
+      navigate: () => {},
+      showDashboard: true,
+      terms,
+      term: terms[0],
+      onTermChange: () => {},
+      lastSync: {},
+      now: Date.now(),
+      onOpenSettings: () => {},
+    })
+  }
+
+  test('the Sync popover says when each site last synced', async () => {
+    await render(header(['Fall 2026']))
+    expect(container.querySelector('select')).toBeNull() // one term: no picker
+    await act(async () => container.querySelector<HTMLButtonElement>('button[aria-haspopup="dialog"]')!.click())
+    expect(container.querySelector('.sync-when')?.textContent).toBe('Last sync: Canvas not synced · Gradescope not synced')
+  })
+
+  test('the term picker shows only with more than one term', async () => {
+    await render(header(['Fall 2026', 'Spring 2026']))
+    expect(container.querySelector('select')).not.toBeNull()
   })
 
   test('cumulative QPA is only offered for the newest term', async () => {
     const qpa: QpaResult = { rows: [], semesterQpa: 3.5, factorableUnits: 36, totalUnits: 36, qualityPoints: 126, cumulativeQpa: null, deansList: null }
     const settings: Settings = { level: 'undergrad', college: null, priorQpa: 3.4, priorUnits: 90, term: 'Spring 2026', showAll: false }
-    const props = { qpa, settings, onSettings: () => {}, onAskClaude: () => {}, onOpenSettings: () => {}, whatIfCourses: [] }
-    await render(createElement(QpaCard, { ...props, newestTerm: false }))
-    expect(text()).toContain('Shown for your newest term only')
+    await render(createElement(QpaExtras, { qpa, settings, onSettings: () => {}, newestTerm: false }))
+    expect(text()).toContain('Cumulative QPA shows for your newest term only')
     expect(container.querySelector('input')).toBeNull()
+  })
+
+  test('with a prior QPA set, the cumulative result shows', async () => {
+    const qpa: QpaResult = { rows: [], semesterQpa: 3.5, factorableUnits: 36, totalUnits: 36, qualityPoints: 126, cumulativeQpa: 3.42, deansList: null }
+    const settings: Settings = { level: 'undergrad', college: null, priorQpa: 3.4, priorUnits: 90, term: null, showAll: false }
+    await render(createElement(QpaExtras, { qpa, settings, onSettings: () => {}, newestTerm: true }))
+    expect(text()).toContain('Cumulative after this semester: 3.42')
+    expect(container.querySelectorAll('input')).toHaveLength(2)
+  })
+})
+
+// ---------------------------------------------------------------- class page routing
+
+describe('class page', () => {
+  const KEY = 'Fall 2026|21241'
+  const PATH = '/class/' + encodeURIComponent(KEY)
+
+  function synced() {
+    saveStore(applyPayload(defaultStore(), payload([syncedCanvas('1')])))
+  }
+
+  function popTo(path: string) {
+    window.history.replaceState(null, '', path)
+    window.dispatchEvent(new PopStateEvent('popstate'))
+  }
+
+  test('a row opens the class at /class/<key>; Back returns to the list', async () => {
+    synced()
+    await renderApp()
+    expect(container.querySelector('.class-row')).not.toBeNull()
+    expect(text()).not.toContain('Midterm 1')
+
+    await act(async () => container.querySelector<HTMLButtonElement>('button.class-row')!.click())
+    expect(window.location.pathname).toBe(PATH)
+    expect(container.querySelector('h1')?.textContent).toBe('21-241')
+    expect(text()).toContain('From Canvas · 11 units')
+    expect(text()).toContain('What you need')
+    expect(text()).toContain('Midterm 1')
+    expect(container.querySelector('.class-row')).toBeNull()
+    // What-if boxes stay hidden until the switch is turned on.
+    expect(container.querySelector('.whatif input')).toBeNull()
+    await act(async () => container.querySelector<HTMLInputElement>('input[role="switch"]')!.click())
+    expect(container.querySelector('.whatif input')).not.toBeNull()
+
+    await act(async () => buttonByText('All classes').click())
+    expect(window.location.pathname).toBe('/')
+    expect(container.querySelector('.class-row')).not.toBeNull()
+  })
+
+  test('the browser Back and Forward buttons (popstate) switch between list and class', async () => {
+    synced()
+    await renderApp()
+    await act(async () => container.querySelector<HTMLButtonElement>('button.class-row')!.click())
+    await act(async () => popTo('/'))
+    expect(container.querySelector('.class-row')).not.toBeNull()
+    await act(async () => popTo(PATH))
+    expect(container.querySelector('.class-row')).toBeNull()
+    expect(text()).toContain('Midterm 1')
+  })
+
+  test('a deep link opens the class directly', async () => {
+    synced()
+    window.history.replaceState(null, '', PATH)
+    await renderApp()
+    expect(container.querySelector('h1')?.textContent).toBe('21-241')
+    expect(text()).toContain('Edit this class')
+  })
+
+  test('a link to a class that is not here falls back to the list', async () => {
+    synced()
+    window.history.replaceState(null, '', '/class/' + encodeURIComponent('Fall 2026|99999'))
+    await renderApp()
+    expect(window.location.pathname).toBe('/')
+    expect(container.querySelector('.class-row')).not.toBeNull()
+  })
+
+  test('a broken /class/ link does not crash', async () => {
+    synced()
+    window.history.replaceState(null, '', '/class/%E0%A4%A')
+    await renderApp()
+    expect(container.querySelector('.class-row')).not.toBeNull()
+  })
+
+  test('removing a hand-added class goes back to the list', async () => {
+    const s = defaultStore()
+    s.manual = [{ key: 'manual:abc', number: '15213', title: '', term: null, percent: 88 }]
+    saveStore(s)
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    window.history.replaceState(null, '', '/class/manual%3Aabc')
+    await renderApp()
+    expect(text()).toContain('Added by hand')
+    await act(async () => buttonByText('Remove this class').click())
+    expect(window.location.pathname).toBe('/')
+    expect(savedStore().manual).toEqual([])
+  })
+})
+
+describe('class page focus and small flows', () => {
+  const KEY = 'Fall 2026|21241'
+  const PATH = '/class/' + encodeURIComponent(KEY)
+
+  function synced() {
+    saveStore(applyPayload(defaultStore(), payload([syncedCanvas('1')])))
+  }
+
+  test('opening a class focuses its name; Back puts focus on the row that was opened', async () => {
+    synced()
+    await renderApp()
+    await act(async () => container.querySelector<HTMLButtonElement>('button.class-row')!.click())
+    expect(document.activeElement).toBe(container.querySelector('h1'))
+
+    await act(async () => buttonByText('All classes').click())
+    const row = container.querySelector<HTMLButtonElement>('button.class-row')!
+    expect(row.dataset.key).toBe(KEY)
+    expect(document.activeElement).toBe(row)
+  })
+
+  test('with what-ifs the class says so, and drops the "Canvas shows" note', async () => {
+    const s = applyPayload(defaultStore(), payload([syncedCanvas('1')]))
+    s.prefs[KEY] = { whatIf: { 'c:12': 10 } } // Canvas says 84%, the what-if makes it 86%
+    saveStore(s)
+    await renderApp()
+    expect(text()).toContain('Includes what-if scores') // the row hint in the list
+    window.history.replaceState(null, '', PATH)
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    await settle(0)
+    expect(text()).toContain('From Canvas · 11 units · Includes what-if scores')
+    expect(text()).not.toContain('Canvas shows')
+  })
+
+  test('"Add a class by hand" opens a dialog that starts in the course number field', async () => {
+    synced()
+    await renderApp()
+    await act(async () => buttonByText('Add a class by hand').click())
+    const input = container.querySelector<HTMLInputElement>('dialog [data-autofocus]')!
+    expect(input).not.toBeNull()
+    expect(document.activeElement).toBe(input)
+  })
+
+  test('/setup with grades has a way back to them', async () => {
+    synced()
+    window.history.replaceState(null, '', '/setup')
+    await renderApp()
+    expect(text()).toContain('Set up the Sync button')
+    await act(async () => buttonByText('My grades').click())
+    expect(window.location.pathname).toBe('/')
+    expect(container.querySelector('.class-row')).not.toBeNull()
+  })
+
+  test('/setup with no grades has no back button', async () => {
+    window.history.replaceState(null, '', '/setup')
+    await renderApp()
+    expect(() => buttonByText('My grades')).toThrow()
+  })
+})
+
+describe('rowHint', () => {
+  const need = (letter: string, min: number, status: NeededResult['status'], needed: number | null = null): NeededResult => ({
+    letter,
+    min,
+    status,
+    needed,
+  })
+
+  test('says "to keep" when the row already shows that letter', () => {
+    const needed = [need('A', 90, 'possible', 88.5), need('B', 80, 'guaranteed', 0)]
+    expect(rowHint(course(), needed, GRADE, 'A')).toBe('Need 88.5% on the rest to keep the A')
+    expect(rowHint(course(), needed, GRADE, 'B')).toBe('Need 88.5% on the rest for an A')
+  })
+
+  test('pass/fail, hidden and what-ifs come first', () => {
+    const needed = [need('A', 90, 'possible', 88.5)]
+    expect(rowHint(course({ prefs: { passFail: true } }), needed, GRADE, 'A', true)).toBe('Pass/fail')
+    expect(rowHint(course({ prefs: { hidden: true } }), needed, GRADE, 'A', true)).toBe('Hidden')
+    expect(rowHint(course(), needed, GRADE, 'A', true)).toBe('Includes what-if scores')
+    expect(rowHint(course(), [need('A', 90, 'unknown')], GRADE)).toBeNull()
   })
 })

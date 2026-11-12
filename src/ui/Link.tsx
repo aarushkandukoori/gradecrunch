@@ -1,6 +1,6 @@
-// Tiny router pieces. We have three pages, so no router library: the App keeps `view` in state and mirrors it in
-// the URL with history.pushState. <NavLink> is a normal link (so middle-click / Cmd-click still open a new tab)
-// that switches the view in place on a plain click.
+// Tiny router pieces. We have a few pages, so no router library: the App keeps `view` in state and mirrors it in
+// the URL with history.pushState. One class opens at /class/<course key>. <NavLink> is a normal link (so
+// middle-click / Cmd-click still open a new tab) that switches the view in place on a plain click.
 import type { MouseEvent, ReactNode } from 'react'
 
 export type View = 'home' | 'setup' | 'privacy'
@@ -12,6 +12,23 @@ export function viewFromPath(path: string): View {
   if (path.startsWith('/setup')) return 'setup'
   if (path.startsWith('/privacy')) return 'privacy'
   return 'home'
+}
+
+const CLASS_PREFIX = '/class/'
+
+/** "/class/Fall%202026%7C21241" for the course key "Fall 2026|21241". */
+export function classPath(courseKey: string): string {
+  return CLASS_PREFIX + encodeURIComponent(courseKey)
+}
+
+/** The course key in a /class/... path, or null for any other path (or a broken one). */
+export function classKeyFromPath(path: string): string | null {
+  if (!path.startsWith(CLASS_PREFIX)) return null
+  try {
+    return decodeURIComponent(path.slice(CLASS_PREFIX.length)) || null
+  } catch {
+    return null // a bad % escape someone typed by hand
+  }
 }
 
 export function NavLink(props: { to: View; navigate: Navigate; className?: string; children: ReactNode }) {
