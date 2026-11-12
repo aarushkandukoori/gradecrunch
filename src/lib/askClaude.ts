@@ -2,14 +2,21 @@
 // Claude themselves; nothing is sent anywhere by us. It only contains course numbers, titles and numbers: no
 // student names, no Canvas/Gradescope ids and no URLs.
 import type { Course, GradeResult, NeededResult, QpaResult, Settings } from '../types'
-import { courseLabel, dropRuleText, formatPercent, formatPoints, formatQpa } from './format'
+import { courseLabel, dropRuleText, formatGradePercent, formatPercent, formatPoints, formatQpa } from './format'
+import { roundPercent } from './grade'
 import { estimatedLetter } from './qpa'
+import { activeWhatIfs } from './whatIfs'
 
 function neededLine(needed: NeededResult[], percent: number | null): string {
   const parts = needed.map((n) => {
     if (n.status === 'guaranteed') return `${n.letter}: guaranteed`
     if (n.status === 'possible' && n.needed != null) return `${n.letter}: need ${n.needed.toFixed(1)}% average`
-    if (n.status === 'locked') return `${n.letter}: ${percent != null && percent >= n.min ? 'locked in' : 'out of reach'}`
+    if (n.status === 'locked') {
+      // Same 2-decimal rounding as the letter math, so 89.996 counts as 90.
+      const reached = percent != null && roundPercent(percent) >= n.min
+      return `${n.letter}: ${reached ? 'locked in' : 'out of reach'}`
+    }
+    if (n.status === 'unknown') return `${n.letter}: unknown (point values for the rest aren't posted yet)`
     return `${n.letter}: out of reach`
   })
   return parts.join('; ')
@@ -35,10 +42,18 @@ export function buildClaudePrompt(
       ? 'CMU QPA is the units-weighted average of grade points (A+ 4.33, A 4, A- 3.67, B+ 3.33, B 3, and so on).'
       : 'CMU QPA is the units-weighted average of grade points (A 4, B 3, C 2, D 1, R 0; no plus or minus grades).',
   )
+  // What-if scores are the student's guesses. Say so, or Claude would read them as real grades.
+  const anyWhatIf = courses.some((c) => activeWhatIfs(c).length > 0)
+  const qpaNote = anyWhatIf ? ' (includes what-if scores)' : ''
   if (qpa.semesterQpa != null) {
-    lines.push(`Estimated semester QPA: ${formatQpa(qpa.semesterQpa)} from ${qpa.factorableUnits} factorable units`)
+    lines.push(`Estimated semester QPA${qpaNote}: ${formatQpa(qpa.semesterQpa)} from ${qpa.factorableUnits} factorable units`)
   }
-  if (qpa.cumulativeQpa != null) lines.push(`Estimated cumulative QPA after this semester: ${formatQpa(qpa.cumulativeQpa)}`)
+  if (qpa.cumulativeQpa != null) {
+    lines.push(`Estimated cumulative QPA after this semester${qpaNote}: ${formatQpa(qpa.cumulativeQpa)}`)
+  }
+  if (anyWhatIf) {
+    lines.push('Note: some grades below include hypothetical what-if scores I typed in (marked "what-if" below). They are not real grades yet.')
+  }
   lines.push('')
 
   for (const course of courses) {
@@ -47,7 +62,13 @@ export function buildClaudePrompt(
     const letter = estimatedLetter(course, grade, settings)
 
     lines.push(`${courseLabel(course)} ${course.number ? course.title : ''}`.trim() + ` (${course.units} units)`)
-    lines.push(`  Current: ${percent != null ? formatPercent(percent) : 'no grades yet'}${letter ? ` (${letter})` : ''}`)
+    const whatIfs = activeWhatIfs(course)
+    const label = whatIfs.length > 0 ? 'With my what-if scores' : 'Current'
+    lines.push(`  ${label}: ${percent != null ? formatGradePercent(percent) : 'no grades yet'}${letter ? ` (${letter})` : ''}`)
+    if (whatIfs.length > 0) {
+      const list = whatIfs.map((i) => `${i.name} ${formatPoints(course.prefs.whatIf?.[i.key])} / ${formatPoints(i.max)}`)
+      lines.push(`  What-if scores included (not real): ${list.join('; ')}`)
+    }
     if (course.prefs.passFail) lines.push('  Taken pass/fail')
     if (course.prefs.letter) lines.push(`  Final letter set by me: ${course.prefs.letter}`)
     if (course.categories.length) {

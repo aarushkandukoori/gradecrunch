@@ -36,6 +36,7 @@ import {
   courseLabel,
   dropRuleText,
   formatDue,
+  formatGradePercent,
   formatPercent,
   formatPoints,
   formatQpa,
@@ -270,6 +271,46 @@ describe('parseStore', () => {
     expect(parseStore({ v: 1, synced: {}, manual: {}, prefs: {} })).toBeNull()
   })
 
+  test('rebuilds prefs field by field so a malformed file cannot crash the app', () => {
+    const parsed = parseStore({
+      v: 1,
+      synced: {},
+      manual: [],
+      prefs: {
+        bad: {
+          units: -3,
+          letter: {},
+          passFail: 'yes',
+          hidden: true,
+          weighted: 1,
+          weights: { a: 30, b: 'x', c: Infinity },
+          cutoffs: [{ letter: 'A', min: 90 }, { letter: '', min: 80 }, { letter: 'B' }, 'junk'],
+          whatIf: { 'c:1': 8, 'c:2': '9' },
+          whatIfGraded: ['c:1', 5],
+          moved: { 'c:1': 'cat', 'c:2': 7 },
+          ignored: 5,
+          included: ['c:3', null],
+          extra: [{ key: 'm:1', name: 'Quiz 9', categoryKey: 'q', max: 20 }, { key: 'm:2', name: 'No max', categoryKey: 'q' }, 'junk'],
+          unknownField: 'dropped',
+        },
+        letterOk: { letter: ' A ' },
+      },
+    })
+    expect(parsed!.prefs).toEqual({
+      bad: {
+        hidden: true,
+        weights: { a: 30 },
+        cutoffs: [{ letter: 'A', min: 90 }],
+        whatIf: { 'c:1': 8 },
+        whatIfGraded: ['c:1'],
+        moved: { 'c:1': 'cat' },
+        included: ['c:3'],
+        extra: [{ key: 'm:1', name: 'Quiz 9', categoryKey: 'q', max: 20 }],
+      },
+      letterOk: { letter: 'A' },
+    })
+  })
+
   test('accepts an exported store', () => {
     const s = applyPayload(defaultStore(), payload('canvas', [syncedCanvas('1')]))
     const json = exportStoreJson(s)
@@ -305,6 +346,41 @@ describe('applyPayload', () => {
     applyPayload(s, payload('canvas', [syncedCanvas('1')]))
     expect(s.synced).toEqual({})
   })
+
+  test('a sync with zero courses changes no course data, only the sync time', () => {
+    const s = applyPayload(defaultStore(), payload('canvas', [syncedCanvas('1')]))
+    const next = applyPayload(s, { ...payload('canvas', []), at: '2026-11-13T00:00:00Z' })
+    expect(next.synced).toEqual(s.synced)
+    expect(next.lastSync.canvas).toBe('2026-11-13T00:00:00Z')
+  })
+
+  test('a course the sync could not read keeps its stored copy', () => {
+    const s = applyPayload(defaultStore(), payload('canvas', [syncedCanvas('1'), syncedCanvas('2', { number: '36225' })]))
+    // Course 1 came back empty (its assignments request failed); course 2 was left out entirely.
+    const broken = syncedCanvas('1', { categories: [], items: [] })
+    const next = applyPayload(s, { ...payload('canvas', [broken, syncedCanvas('3', { number: '15122' })]), failedIds: ['1', '2'] })
+    expect(next.synced['canvas:1'].items).toHaveLength(4)
+    expect(next.synced['canvas:2']).toEqual(s.synced['canvas:2'])
+    expect(next.synced['canvas:3']).toBeDefined()
+  })
+
+  test('a failed course with no stored copy is still added', () => {
+    const next = applyPayload(defaultStore(), { ...payload('canvas', [syncedCanvas('1', { items: [] })]), failedIds: ['1'] })
+    expect(next.synced['canvas:1']).toBeDefined()
+  })
+
+  test("courses from terms the sync did not cover stay (last term's final grades)", () => {
+    const fall = syncedCanvas('1', { term: 'Fall 2026' })
+    const s = applyPayload(defaultStore(), payload('canvas', [fall, syncedCanvas('2', { number: '36225' })]))
+    const next = applyPayload(s, payload('canvas', [syncedCanvas('9', { term: 'Spring 2027', number: '15122' })]))
+    expect(Object.keys(next.synced).sort()).toEqual(['canvas:1', 'canvas:2', 'canvas:9'])
+  })
+
+  test('terms are compared by meaning, so "fall 2026" covers "Fall 2026"', () => {
+    const s = applyPayload(defaultStore(), payload('canvas', [syncedCanvas('1'), syncedCanvas('2', { number: '36225' })]))
+    const next = applyPayload(s, payload('canvas', [syncedCanvas('1', { term: 'fall 2026' })]))
+    expect(Object.keys(next.synced)).toEqual(['canvas:1']) // course 2 was dropped this term
+  })
 })
 
 describe('manual courses', () => {
@@ -322,6 +398,25 @@ describe('manual courses', () => {
 // ---------------------------------------------------------------- store: prefs helpers
 
 describe('prefs helpers', () => {
+  test('withWhatIf keeps whatIfGraded in sync', () => {
+    let p = withWhatIf({}, 'c:1', 8, true)
+    expect(p.whatIf).toEqual({ 'c:1': 8 })
+    expect(p.whatIfGraded).toEqual(['c:1'])
+    p = withWhatIf(p, 'c:1', 9, true) // typed again: listed once
+    expect(p.whatIfGraded).toEqual(['c:1'])
+    p = withWhatIf(p, 'c:2', 5) // on an ungraded item: not listed
+    expect(p.whatIfGraded).toEqual(['c:1'])
+    p = withWhatIf(p, 'c:1', null, true) // cleared: removed from both
+    expect(cleanPrefs(p)).toEqual({ whatIf: { 'c:2': 5 } })
+  })
+
+  test('updatePrefs can start from the prefs the app shows (renamed item keys)', () => {
+    let s = updatePrefs(defaultStore(), 'k', () => ({ whatIf: { 'g:9:1': 85 } }))
+    // The app shows the what-if under the item's current key "c:1"; clearing it there must really clear it.
+    s = updatePrefs(s, 'k', (p) => withWhatIf(p, 'c:1', null), { whatIf: { 'c:1': 85 } })
+    expect(s.prefs.k).toBeUndefined()
+  })
+
   test('updatePrefs removes empty values and deletes the course entry when nothing is left', () => {
     let s = updatePrefs(defaultStore(), 'k', (p) => withWhatIf(p, 'c:1', 8))
     expect(s.prefs.k).toEqual({ whatIf: { 'c:1': 8 } })
@@ -424,6 +519,14 @@ describe('format', () => {
     expect(formatPercent(85.123)).toBe('85.1%')
     expect(formatPercent(null)).toBe('')
     expect(formatPercent(90, 0)).toBe('90%')
+    // Course grades: 2 decimals like Canvas, same rounding as the letter math.
+    expect(formatGradePercent(89.96)).toBe('89.96%')
+    expect(formatGradePercent(89.95)).toBe('89.95%')
+    expect(formatGradePercent(84)).toBe('84%')
+    expect(formatGradePercent(84.1)).toBe('84.1%')
+    expect(formatGradePercent(89.995)).toBe('90%') // letterFor also gives the A here
+    expect(formatGradePercent(89.994)).toBe('89.99%')
+    expect(formatGradePercent(null)).toBe('')
     expect(formatQpa(3.5149)).toBe('3.51')
     expect(formatQpa(null)).toBe('')
     expect(formatPoints(36)).toBe('36')
@@ -629,7 +732,7 @@ describe('buildClaudePrompt', () => {
       settings,
     )
     expect(text).toContain('21-241 Matrices and Linear Transformations (11 units)')
-    expect(text).toContain('Current: 84.0% (B)')
+    expect(text).toContain('Current: 84% (B)') // 2 decimals like Canvas, no trailing zeros
     expect(text).toContain('Homework: weight 40%, 90.0% (18 / 20 pts), drops lowest 1')
     expect(text).toContain('A: need 95.2% average; B: guaranteed')
     expect(text).toContain('Estimated semester QPA: 3.25 from 44 factorable units')
@@ -685,7 +788,8 @@ describe('<App />', () => {
     const text = container.textContent ?? ''
     expect(text).toContain('Estimated semester QPA')
     expect(text).toContain('21-241')
-    expect(text).toContain('84.0%')
+    expect(text).toContain('84%')
+    expect(text).not.toContain('84.0%')
     expect(text).toContain('2 graded · 2 to go')
 
     const head = container.querySelector<HTMLButtonElement>('button.course-head')!
@@ -697,7 +801,9 @@ describe('<App />', () => {
   })
 
   test('a #sync= fragment is imported, removed from the URL, and saved', async () => {
-    const encoded = await encodePayload(payload('canvas', [syncedCanvas('7')], ['Course 99 failed']))
+    // A fresh link (made just now), so no "this link is old" question.
+    const fresh = { ...payload('canvas', [syncedCanvas('7')], ['Course 99 failed']), at: new Date().toISOString() }
+    const encoded = await encodePayload(fresh)
     window.history.replaceState(null, '', `/#sync=${encoded}&bv=${BOOKMARKLET_VERSION}`)
     await renderApp()
     // replaceState happens synchronously on mount, before decoding.
@@ -734,5 +840,18 @@ describe('demo', () => {
     expect(Object.keys(real.synced)).toEqual(['canvas:1'])
     expect(clearDemo(s).synced).toEqual({})
     expect(parseStore(JSON.parse(exportStoreJson(s)))?.demo).toBe(true)
+  })
+
+  test('classes added by hand during the demo survive a real sync and ending the demo', async () => {
+    const { demoPayloads } = await import('../src/lib/demo')
+    const { loadDemo, clearDemo } = await import('../src/lib/store')
+    const mc = { key: 'manual:abc', number: '15213', title: '', term: 'Fall 2026', percent: 88 }
+    let s = addManualCourse(loadDemo(defaultStore(), demoPayloads()), mc)
+    s = updatePrefs(s, mc.key, (p) => ({ ...p, units: 12 }))
+    s = updatePrefs(s, 'Fall 2026|99999', (p) => ({ ...p, units: 3 })) // prefs of a demo course
+    for (const after of [applyPayload(s, payload('canvas', [syncedCanvas('1')])), clearDemo(s)]) {
+      expect(after.manual).toEqual([mc])
+      expect(after.prefs).toEqual({ [mc.key]: { units: 12 } })
+    }
   })
 })

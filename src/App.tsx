@@ -1,14 +1,15 @@
 // The whole app. It owns the saved store, turns it into courses + grades + QPA, picks which page to show
-// (home / setup / privacy, mirrored in the URL), and handles syncing: the Sync bookmarklet sends grades here in
-// the #sync= fragment, which we read once on load.
+// (home / setup / privacy, mirrored in the URL), and handles syncing: the Sync bookmarklet opens this site at
+// /#receive and hands the grades over by postMessage (see ui/receive.ts), or, when a popup blocker gets in the
+// way, sends them in a #sync= link that we read once on load. Every sync can be undone from its toast.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { buildClaudePrompt } from './lib/askClaude'
 import { catalogReady, loadCatalog } from './lib/catalog'
 import { demoPayloads } from './lib/demo'
-import { BOOKMARKLET_VERSION, parseSyncFragment } from './lib/bookmarklet'
+import { BOOKMARKLET_VERSION, parseSyncFragment, RECEIVE_HASH } from './lib/bookmarklet'
 import { plural } from './lib/format'
 import { gradeCourse, neededForLetters } from './lib/grade'
-import { buildCourses, termsOf } from './lib/merge'
+import { buildCourses, rekeyPrefs, termsOf } from './lib/merge'
 import { decodePayload } from './lib/payload'
 import { computeQpa } from './lib/qpa'
 import {
@@ -23,6 +24,7 @@ import {
   removeManualCourse,
   saveStore,
   setTheme,
+  STORE_KEY,
   updatePrefs,
   updateSettings,
   type Theme,
@@ -37,7 +39,8 @@ import { PrivacyPage } from './ui/PrivacyPage'
 import { SettingsDialog } from './ui/SettingsDialog'
 import { Toasts, useToasts } from './ui/Toasts'
 import { Welcome } from './ui/Welcome'
-import { neededFor, pickTerm, splitCourses } from './ui/view'
+import { browserReceiverDeps, startReceiver, syncLinkIsStale } from './ui/receive'
+import { neededFor, pickTerm, splitCourses, termsWithGrades } from './ui/view'
 
 const CLAUDE_URL = 'https://claude.ai/new'
 const SOURCE_NAMES: Record<SyncPayload['kind'], string> = { canvas: 'Canvas', gradescope: 'Gradescope', autolab: 'Autolab' }
@@ -56,7 +59,46 @@ export default function App() {
 
   // ------------------------------------------------------------ persistence, clock, routing
 
-  useEffect(() => saveStore(store), [store])
+  // Saving and other tabs. Every change here is saved to localStorage. If another GradeCrunch tab saves (a sync
+  // usually opens a new tab), this tab must load that copy first: saving its own old copy on the next click
+  // would silently throw the new sync away.
+  const lastSavedRaw = useRef<string | null>(null) // the localStorage text this tab last wrote or loaded
+  const skipNextSave = useRef(false) // the store just came from another tab: no need to write it back
+
+  useEffect(() => {
+    if (skipNextSave.current) {
+      skipNextSave.current = false
+      return
+    }
+    saveStore(store)
+    lastSavedRaw.current = readSavedRaw()
+  }, [store])
+
+  useEffect(() => {
+    function reloadIfChanged() {
+      const raw = readSavedRaw()
+      if (raw === lastSavedRaw.current) return // nothing new
+      lastSavedRaw.current = raw
+      skipNextSave.current = true
+      setStore(loadStore())
+    }
+    // 'storage' fires in every other tab when one tab writes. Focus / visibility are a backup check for browsers
+    // that delay the event while a tab is in the background.
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === STORE_KEY || e.key === null) reloadIfChanged() // null = storage cleared ("Delete everything")
+    }
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') reloadIfChanged()
+    }
+    window.addEventListener('storage', onStorage)
+    window.addEventListener('focus', reloadIfChanged)
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      window.removeEventListener('storage', onStorage)
+      window.removeEventListener('focus', reloadIfChanged)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
+  }, [])
 
   useEffect(() => {
     if (catalogLoaded) return
@@ -92,7 +134,12 @@ export default function App() {
     [courses],
   )
   const terms = useMemo(() => termsOf(courses), [courses])
-  const term = pickTerm(terms, store.settings.term)
+  // Default to the newest term that has grades, not next semester's empty courses that appear in November.
+  const gradedTerms = useMemo(() => termsWithGrades(courses, grades), [courses, grades])
+  const term = pickTerm(terms, store.settings.term, gradedTerms)
+  // "Cumulative after this semester" only for the newest term: the SIO QPA the student typed already counts
+  // older terms, so adding an older term again would count it twice.
+  const newestTerm = terms.length === 0 || term === terms[0]
   const { main, other } = useMemo(() => splitCourses(courses, term), [courses, term])
   // "What do I need" runs the grade math many times per course, so only do it for courses on screen.
   const needed = useMemo(() => {
@@ -101,16 +148,26 @@ export default function App() {
     for (const c of [...main, ...other]) map.set(c.key, neededFor(c, compute, store.settings.level))
     return map
   }, [main, other, store.settings.level])
-  const qpa = useMemo(() => computeQpa(main, grades, store.settings), [main, grades, store.settings])
+  const qpa = useMemo(
+    () => computeQpa(main, grades, store.settings, { includeCumulative: newestTerm }),
+    [main, grades, store.settings, newestTerm],
+  )
   const hasData = Object.keys(store.synced).length > 0 || store.manual.length > 0
 
   // ------------------------------------------------------------ store updates
 
   const changeSettings = useCallback((patch: Partial<Settings>) => setStore((s) => updateSettings(s, patch)), [])
-  const changePrefs = useCallback(
-    (key: string, change: (p: CoursePrefs) => CoursePrefs) => setStore((s) => updatePrefs(s, key, change)),
-    [],
-  )
+  // The latest courses, for changePrefs below (a ref so changePrefs never changes and cards don't re-render).
+  const coursesRef = useRef(courses)
+  useEffect(() => {
+    coursesRef.current = courses
+  }, [courses])
+  const changePrefs = useCallback((key: string, change: (p: CoursePrefs) => CoursePrefs) => {
+    const items = coursesRef.current.find((c) => c.key === key)?.items
+    // Start from the prefs with old item keys renamed to the current ones (rekeyPrefs), the same view the course
+    // shows. Otherwise clearing a what-if saved under an item's old key would leave the old entry behind.
+    setStore((s) => updatePrefs(s, key, change, items ? rekeyPrefs(s.prefs[key] ?? {}, items) : undefined))
+  }, [])
   const addManual = useCallback(
     (course: ManualCourse) => {
       setStore((s) => addManualCourse(s, course))
@@ -132,18 +189,51 @@ export default function App() {
 
   // ------------------------------------------------------------ syncing
 
+  /** Replaces the store and offers an Undo that puts back the store from just before. */
+  const replaceWithUndo = useCallback(
+    (change: (s: Store) => Store, message: string, extra: { details?: string[]; detailsLabel?: string } = {}) => {
+      let before: Store | null = null
+      setStore((s) => {
+        before = s // the updater runs before Undo can be clicked, so `before` is set by then
+        return change(s)
+      })
+      toast(message, {
+        ...extra,
+        action: {
+          label: 'Undo',
+          onClick: () => {
+            if (before) setStore(before)
+            toast('Undone. Your grades are back to how they were.')
+          },
+        },
+      })
+    },
+    [toast],
+  )
+
   /** Saves a sync result and says how it went. */
   const applySync = useCallback(
     (payload: SyncPayload) => {
-      setStore((s) => applyPayload(s, payload))
       const source = SOURCE_NAMES[payload.kind]
       const n = payload.warnings.length
-      toast(`Synced ${plural(payload.courses.length, 'course')} from ${source}`, {
+      replaceWithUndo((s) => applyPayload(s, payload), `Synced ${plural(payload.courses.length, 'course')} from ${source}`, {
         details: n > 0 ? payload.warnings : undefined,
         detailsLabel: plural(n, 'warning'),
       })
     },
-    [toast],
+    [replaceWithUndo],
+  )
+
+  /** Tells the student to update an old Sync button (it still works, but may miss fixes). */
+  const checkVersion = useCallback(
+    (version: number | null) => {
+      if (version !== null && version < BOOKMARKLET_VERSION) {
+        toast('Your Sync button is out of date. Drag the new one from Setup.', {
+          action: { label: 'Open Setup', onClick: () => navigate('setup') },
+        })
+      }
+    },
+    [toast, navigate],
   )
 
   /** Reads grades the bookmarklet put in the URL fragment (#sync=<payload>&bv=<version>). */
@@ -155,18 +245,26 @@ export default function App() {
         return
       }
       try {
-        applySync(await decodePayload(parsed.payload))
-        if (parsed.version !== null && parsed.version < BOOKMARKLET_VERSION) {
-          toast('Your Sync button is out of date. Drag the new one from Setup.', {
-            action: { label: 'Open Setup', onClick: () => navigate('setup') },
-          })
+        const payload = await decodePayload(parsed.payload)
+        // A real sync opens this link within seconds. An old one came from browser history or from someone else's
+        // link, so ask before it replaces anything.
+        if (syncLinkIsStale(payload.at, Date.now())) {
+          const t = Date.parse(payload.at)
+          const when = Number.isNaN(t) ? 'an unknown time' : new Date(t).toLocaleString()
+          const ok = window.confirm(`This sync link is from ${when}. Replace your ${SOURCE_NAMES[payload.kind]} grades with it?`)
+          if (!ok) {
+            toast('Ignored the old sync link. Nothing changed.')
+            return
+          }
         }
+        applySync(payload)
+        checkVersion(parsed.version)
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         toast(`Couldn't read the synced grades: ${msg}`, { tone: 'error' })
       }
     },
-    [applySync, toast, navigate],
+    [applySync, checkVersion, toast],
   )
 
   // Once on load. The ref guard matters because React's StrictMode runs effects twice in development.
@@ -175,11 +273,19 @@ export default function App() {
     startedRef.current = true
     const hash = window.location.hash
     if (hash.startsWith('#sync=')) {
-      // Take the grades out of the address bar and history right away, before even decoding them.
+      // Take the grades out of the address bar right away, before even decoding them.
       window.history.replaceState(null, '', window.location.pathname)
       void importFragment(hash)
+    } else if (hash === RECEIVE_HASH) {
+      // Opened by the Sync button: wait for the grades from the tab that opened us. Without an opener (the tab
+      // was opened by hand) there is nothing to wait for, and this is just the normal app.
+      window.history.replaceState(null, '', window.location.pathname)
+      startReceiver(browserReceiverDeps(), (payload, version) => {
+        applySync(payload)
+        checkVersion(version)
+      })
     }
-  }, [importFragment])
+  }, [importFragment, applySync, checkVersion])
 
   // ------------------------------------------------------------ theme, data
 
@@ -225,6 +331,7 @@ export default function App() {
     page = (
       <Dashboard
         term={term}
+        newestTerm={newestTerm}
         main={main}
         other={other}
         grades={grades}
@@ -270,14 +377,20 @@ export default function App() {
         onSettings={changeSettings}
         theme={theme}
         onTheme={changeTheme}
-        onImport={(s) => {
-          setStore(s)
-          toast('Imported your data')
-        }}
+        onImport={(s) => replaceWithUndo(() => s, 'Imported your data')}
         onDeleteAll={deleteAll}
       />
       <ClaudeDialog text={claudeText} onClose={() => setClaudeText(null)} />
       <Toasts toasts={toasts} onDismiss={dismiss} />
     </>
   )
+}
+
+/** The saved store's raw text, to tell whether another tab changed it. null when nothing is saved. */
+function readSavedRaw(): string | null {
+  try {
+    return localStorage.getItem(STORE_KEY)
+  } catch {
+    return null // storage blocked (private mode): there are no other tabs' copies to worry about
+  }
 }

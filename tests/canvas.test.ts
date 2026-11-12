@@ -434,6 +434,14 @@ describe('syncCanvas', () => {
     expect(linear.items).toEqual([])
     expect(linear.canvasScore).toBe(91.5) // still useful from the course list
     expect(payload.warnings).toContain('Matrices and Linear Transformations: could not read assignments (Canvas answered 500)')
+    // Listed as failed so the app keeps the stored assignments instead of replacing them with [].
+    expect(payload.failedIds).toEqual(['101'])
+  })
+
+  test('a letter-scale failure alone does not mark the course as failed', async () => {
+    const { fetchPage } = fakeCanvas() // course 103's grading_standards answers 404
+    const payload = await syncCanvas(fetchPage)
+    expect(payload.failedIds).toEqual([])
   })
 
   test('missing standard id in the list gives a warning and no scheme', async () => {

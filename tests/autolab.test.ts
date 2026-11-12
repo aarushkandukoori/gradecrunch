@@ -61,6 +61,27 @@ describe('syncAutolab', () => {
     const c = payload.courses[0]
     expect(c).toMatchObject({ source: 'autolab', sourceId: '15213-f26', number: '15213', term: 'Fall 2026', title: 'Introduction to Computer Systems' })
     expect(c.items).toHaveLength(6)
+    expect(payload.failedIds).toEqual([])
+  })
+
+  test('getting logged out mid-sync stops the whole sync instead of saving an empty course', async () => {
+    await expect(
+      syncAutolab(async (path) =>
+        path === '/courses'
+          ? { html: coursesHtml, url: 'https://autolab.andrew.cmu.edu/courses' }
+          : { html: '<html><body>Sign in</body></html>', url: 'https://autolab.andrew.cmu.edu/auth/users/sign_in' },
+      ),
+    ).rejects.toThrow('Log in to Autolab first')
+  })
+
+  test('a gradebook that fails to load becomes a warning and a failed id', async () => {
+    const payload = await syncAutolab(async (path) => {
+      if (path === '/courses') return { html: coursesHtml, url: 'https://autolab.andrew.cmu.edu/courses' }
+      throw new Error('Autolab returned an error (500) for ' + path)
+    })
+    expect(payload.courses).toEqual([])
+    expect(payload.failedIds).toEqual(['15213-f26']) // the app keeps its stored copy
+    expect(payload.warnings[0]).toMatch(/couldn't read Introduction to Computer Systems/)
   })
 
   test('a redirect to the login page means "log in first"', async () => {
@@ -82,5 +103,6 @@ describe('syncAutolab', () => {
     )
     expect(payload.courses).toHaveLength(0)
     expect(payload.warnings[0]).toMatch(/nickname/)
+    expect(payload.failedIds).toEqual(['15213-f26']) // left out, so keep any stored copy
   })
 })

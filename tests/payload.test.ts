@@ -165,11 +165,62 @@ describe('validatePayload', () => {
     p.courses = Array.from({ length: 100 }, (_, i) => ({ ...course, sourceId: String(i) }))
     p.warnings = Array.from({ length: 500 }, () => 'warn')
     const out = validatePayload(p)
-    expect(out.courses).toHaveLength(60)
+    expect(out.courses).toHaveLength(40)
     expect(out.courses[0].items).toHaveLength(400)
-    expect(out.courses[0].categories).toHaveLength(60)
+    expect(out.courses[0].categories).toHaveLength(40)
     expect(out.courses[0].title).toHaveLength(300)
+    // 4000 items in total: ten full courses, then nothing is left for the rest.
+    expect(out.courses.reduce((t, c) => t + c.items.length, 0)).toBe(4000)
+    expect(out.courses[9].items).toHaveLength(400)
+    expect(out.courses[10].items).toHaveLength(0)
     expect(out.warnings).toHaveLength(50)
+    // Our own warnings come first, so the student learns that data was cut.
+    expect(out.warnings[0]).toMatch(/first 40 of 100 courses/)
+    expect(out.warnings[1]).toMatch(/only the first 400 of 1000 items/)
+  })
+
+  test('warns about every cut, even a small one', () => {
+    const p = samplePayload()
+    const course = p.courses[0]
+    course.items = Array.from({ length: 401 }, (_, i) => ({ ...course.items[0], id: String(i) }))
+    course.scheme = Array.from({ length: 20 }, (_, i) => ({ letter: `L${i}`, min: i }))
+    const out = validatePayload(p)
+    expect(out.courses[0].items).toHaveLength(400)
+    expect(out.courses[0].scheme).toHaveLength(15)
+    expect(out.warnings).toEqual([
+      `${course.title}: only the first 400 of 401 items were kept.`,
+      `${course.title}: only the first 15 rows of the letter scheme were kept.`,
+      'Could not read the grading scheme for 99999',
+    ])
+  })
+
+  test('over the course limit, the newest terms are kept', () => {
+    const p = samplePayload()
+    const old = { ...p.courses[0], term: 'Fall 2025' }
+    p.courses = [
+      ...Array.from({ length: 30 }, (_, i) => ({ ...old, sourceId: `old${i}` })),
+      ...Array.from({ length: 20 }, (_, i) => ({ ...old, sourceId: `new${i}`, term: 'Fall 2026' })),
+    ]
+    const out = validatePayload(p)
+    expect(out.courses).toHaveLength(40)
+    expect(out.courses.filter((c) => c.term === 'Fall 2026')).toHaveLength(20)
+    expect(out.courses[0].sourceId).toBe('new0')
+  })
+
+  test('drop counts are capped at the number of items in that category', () => {
+    const p = samplePayload()
+    p.courses[0].categories[0].dropLowest = 150 // category 11 has 2 items
+    p.courses[0].categories[0].dropHighest = 40
+    const out = validatePayload(p)
+    expect(out.courses[0].categories[0]).toMatchObject({ dropLowest: 2, dropHighest: 2 })
+  })
+
+  test('keeps failedIds as a capped list of strings', () => {
+    const raw = { ...samplePayload(), failedIds: ['1001', 7, '', '1002', ...Array.from({ length: 200 }, (_, i) => `x${i}`)] }
+    const out = validatePayload(raw)
+    expect(out.failedIds?.slice(0, 3)).toEqual(['1001', '1002', 'x0'])
+    expect(out.failedIds).toHaveLength(100)
+    expect(validatePayload(samplePayload()).failedIds).toBeUndefined()
   })
 
   test('coerces wrong types to safe values', () => {
@@ -201,7 +252,8 @@ describe('validatePayload', () => {
     }
     const out = validatePayload(raw)
     expect(typeof out.at).toBe('string')
-    expect(out.warnings).toEqual(['ok'])
+    // Two unreadable courses and one unreadable item are reported, then the sync's own warning.
+    expect(out.warnings).toEqual(['course 1: 1 unreadable item skipped.', '2 courses could not be read and were skipped.', 'ok'])
     expect(out.courses).toHaveLength(1)
     const c = out.courses[0]
     expect(c.number).toBeNull()
@@ -216,7 +268,8 @@ describe('validatePayload', () => {
       { letter: 'B', min: 80 },
     ])
     expect(c.syncedAt).toBe(out.at)
-    expect(c.categories).toEqual([{ id: '5', name: 'HW', weight: null, dropLowest: 0, dropHighest: 2, neverDrop: [] }])
+    // dropHighest 2.7 -> 2, then capped at 0 because no item is in category 5.
+    expect(c.categories).toEqual([{ id: '5', name: 'HW', weight: null, dropLowest: 0, dropHighest: 0, neverDrop: [] }])
     expect(c.items).toEqual([
       { id: '9', name: 'HW 1', categoryId: null, score: 8.5, max: null, status: 'unsubmitted', due: null, omit: false, url: null },
     ])

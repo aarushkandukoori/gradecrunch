@@ -10,6 +10,7 @@ import {
   formatCourseNumber,
   letterPoints,
   stripPlusMinus,
+  toCmuLetter,
 } from '../src/lib/cmu'
 import { computeQpa, estimatedLetter } from '../src/lib/qpa'
 
@@ -93,8 +94,29 @@ describe('letterPoints', () => {
     }
     expect(letterPoints('', 'undergrad')).toBeNull()
     expect(letterPoints('E', 'undergrad')).toBeNull()
-    expect(letterPoints('D-', 'grad')).toBeNull() // not on the CMU grad scale
     expect(letterPoints('CONSTRUCTOR', 'grad')).toBeNull()
+    expect(letterPoints('E', 'grad')).toBeNull()
+  })
+  it('grad: letters not on the CMU grad scale map to the nearest CMU grade (D- -> D, F -> R)', () => {
+    expect(letterPoints('D-', 'grad')).toBe(1)
+    expect(letterPoints('D−', 'grad')).toBe(1) // Unicode minus
+    expect(letterPoints('f', 'grad')).toBe(0)
+  })
+})
+
+describe('toCmuLetter', () => {
+  it('undergrad strips +/- and turns F into R', () => {
+    expect(toCmuLetter('A-', 'undergrad')).toBe('A')
+    expect(toCmuLetter('B−', 'undergrad')).toBe('B')
+    expect(toCmuLetter('F', 'undergrad')).toBe('R')
+    expect(toCmuLetter('P', 'undergrad')).toBe('P')
+  })
+  it('grad keeps +/-, maps D- to D and F to R, leaves other letters alone', () => {
+    expect(toCmuLetter('A-', 'grad')).toBe('A-')
+    expect(toCmuLetter('D-', 'grad')).toBe('D')
+    expect(toCmuLetter('F', 'grad')).toBe('R')
+    expect(toCmuLetter(' w ', 'grad')).toBe('W')
+    expect(toCmuLetter('E', 'grad')).toBe('E')
   })
 })
 
@@ -145,6 +167,15 @@ describe('estimatedLetter', () => {
     expect(estimatedLetter(course('21241', 9), gradeWith('A-'), settings({ level: 'grad' }))).toBe('A-')
     expect(estimatedLetter(course('21241', 9), gradeWith('F'), s)).toBe('R')
     expect(estimatedLetter(course('21241', 9, { letter: 'P' }), gradeWith('A'), s)).toBe('P')
+  })
+
+  it('grad: a D- from a Canvas scheme becomes D and still counts toward QPA', () => {
+    const grad = settings({ level: 'grad' })
+    const c = course('21241', 12)
+    expect(estimatedLetter(c, gradeWith('D-'), grad)).toBe('D')
+    const q = computeQpa([c, graded('15122', 12, 'A')], new Map([[c.key, gradeWith('D-')]]), grad)
+    expect(q.rows[0]).toMatchObject({ letter: 'D', points: 1, factorable: true })
+    expect(q.semesterQpa).toBeCloseTo(2.5, 10) // (1*12 + 4*12) / 24
   })
 })
 
@@ -253,6 +284,16 @@ describe('computeQpa', () => {
     const none = computeQpa([course('21241', 12)], noGrades, settings({ priorQpa: 3.2, priorUnits: 50 }))
     expect(none.cumulativeQpa).toBeCloseTo(3.2, 10)
   })
+
+  it('includeCumulative: false (a past term, already in the SIO cumulative) gives no cumulative', () => {
+    const courses = [graded('21241', 12, 'A'), graded('15122', 12, 'B')]
+    const s = settings({ priorQpa: 3.5, priorUnits: 96 })
+    const past = computeQpa(courses, noGrades, s, { includeCumulative: false })
+    expect(past.cumulativeQpa).toBeNull()
+    expect(past.semesterQpa).toBeCloseTo(3.5, 10) // the semester QPA itself is unchanged
+    expect(computeQpa(courses, noGrades, s, { includeCumulative: true }).cumulativeQpa).toBeCloseTo(3.5, 10)
+    expect(computeQpa(courses, noGrades, s).cumulativeQpa).not.toBeNull() // default: included
+  })
 })
 
 // ---------------------------------------------------------------- Dean's List
@@ -265,6 +306,12 @@ describe("Dean's List", () => {
     expect(computeQpa(courses, noGrades, settings()).deansList).toBeNull()
     expect(computeQpa(courses, noGrades, settings({ college: 'cfa' })).deansList).toBeNull()
     expect(computeQpa(courses, noGrades, settings({ college: 'heinz' })).deansList).toBeNull()
+  })
+
+  it('null for grad students (Dean\'s List is an undergraduate honor)', () => {
+    const courses = four(['A', 'A', 'A'])
+    expect(computeQpa(courses, noGrades, settings({ college: 'scs' })).deansList).not.toBeNull()
+    expect(computeQpa(courses, noGrades, settings({ college: 'scs', level: 'grad' })).deansList).toBeNull()
   })
 
   it('SCS: 3.75 on 36 units', () => {

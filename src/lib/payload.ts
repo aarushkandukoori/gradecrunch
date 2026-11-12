@@ -6,11 +6,16 @@
 // a clean SyncPayload field by field and throws away anything unexpected.
 import type { GradeCut, ItemStatus, SyncedCategory, SyncedCourse, SyncedItem, SyncPayload } from '../types'
 import { AUTOLAB_ORIGIN, CANVAS_ORIGIN, GRADESCOPE_ORIGIN } from './brand'
+import { termSortKey } from './courseNumber'
 
-// Limits that keep a hostile or broken link from freezing the page.
-const MAX_COURSES = 60
-const MAX_ITEMS = 400
-const MAX_CATEGORIES = 60
+// Limits that keep a hostile or broken link from freezing the page (the grade math runs on every course on
+// every render). Real CMU data is far below them. Whenever something is cut, the payload gets a warning.
+const MAX_COURSES = 40
+const MAX_ITEMS = 400 // per course
+const MAX_TOTAL_ITEMS = 4000 // across all courses
+const MAX_CATEGORIES = 40 // per course
+const MAX_CUTS = 15 // letter-scheme rows (A+ ... R is 13)
+const MAX_FAILED_IDS = 100
 const MAX_NAME = 300
 const MAX_WARNINGS = 50
 const MAX_DECODED_BYTES = 10_000_000 // stops "gzip bombs" (tiny input that inflates to gigabytes)
@@ -109,23 +114,77 @@ export function validatePayload(x: unknown): SyncPayload {
   }
   const kind = x.kind
   const at = str(x.at, 40) ?? new Date().toISOString()
-  const courses: SyncedCourse[] = []
-  for (const c of arr(x.courses).slice(0, MAX_COURSES)) {
-    const clean = cleanCourse(c, kind, at)
-    if (clean) courses.push(clean)
+  const ours: string[] = [] // warnings about what we cut here
+
+  let rawCourses = arr(x.courses)
+  if (rawCourses.length > MAX_COURSES) {
+    // Keep the newest terms (the ones the dashboard shows). sort is stable, so same-term courses keep their order.
+    const termOf = (c: unknown) => termSortKey(isObject(c) && typeof c.term === 'string' ? c.term : null)
+    rawCourses = [...rawCourses].sort((a, b) => termOf(b) - termOf(a))
+    ours.push(`Only the first ${MAX_COURSES} of ${rawCourses.length} courses were kept (newest terms first).`)
+    rawCourses = rawCourses.slice(0, MAX_COURSES)
   }
-  const warnings = arr(x.warnings)
+
+  const courses: SyncedCourse[] = []
+  let itemBudget = MAX_TOTAL_ITEMS // shrinks as courses use it up
+  let unreadable = 0
+  for (const c of rawCourses) {
+    const clean = cleanCourse(c, kind, at, itemBudget, ours)
+    if (!clean) {
+      unreadable++
+      continue
+    }
+    itemBudget -= clean.items.length
+    courses.push(clean)
+  }
+  if (unreadable > 0) ours.push(`${plural(unreadable, 'course')} could not be read and ${unreadable === 1 ? 'was' : 'were'} skipped.`)
+
+  const theirs = arr(x.warnings)
     .map((w) => str(w, MAX_NAME))
     .filter((w): w is string => w !== null)
-    .slice(0, MAX_WARNINGS)
-  return { v: 1, kind, at, courses, warnings }
+  // Ours first, so a sync that already sent many warnings cannot push out the news that data was cut.
+  const warnings = [...ours, ...theirs].slice(0, MAX_WARNINGS)
+
+  const failedIds = arr(x.failedIds)
+    .map((id) => str(id, 100))
+    .filter(notNull)
+    .slice(0, MAX_FAILED_IDS)
+  return { v: 1, kind, at, courses, warnings, ...(failedIds.length > 0 ? { failedIds } : {}) }
 }
 
-function cleanCourse(c: unknown, kind: SyncPayload['kind'], at: string): SyncedCourse | null {
+/**
+ * One clean course, or null when it has no sourceId. `itemBudget` is how many items are still allowed across
+ * the whole payload; anything cut is reported in `warnings`.
+ */
+function cleanCourse(c: unknown, kind: SyncPayload['kind'], at: string, itemBudget: number, warnings: string[]): SyncedCourse | null {
   if (!isObject(c)) return null
   const sourceId = str(c.sourceId, 100)
   if (!sourceId) return null // merge keys depend on it, so a course without one is useless
   const siteRoot = { canvas: CANVAS_ORIGIN, gradescope: GRADESCOPE_ORIGIN, autolab: AUTOLAB_ORIGIN }[kind] + '/'
+  const title = str(c.title, MAX_NAME) ?? ''
+  const label = title || `course ${sourceId}`
+
+  // Items: drop unreadable ones, then cut to the per-course and whole-payload limits.
+  const rawItems = arr(c.items)
+  const readable = rawItems.map(cleanItem).filter(notNull)
+  const limit = Math.max(0, Math.min(MAX_ITEMS, itemBudget))
+  const items = readable.slice(0, limit)
+  const skipped = rawItems.length - readable.length
+  if (skipped > 0) warnings.push(`${label}: ${plural(skipped, 'unreadable item')} skipped.`)
+  if (readable.length > limit) warnings.push(`${label}: only the first ${limit} of ${readable.length} items were kept.`)
+
+  const rawCategories = arr(c.categories)
+  if (rawCategories.length > MAX_CATEGORIES) {
+    warnings.push(`${label}: only the first ${MAX_CATEGORIES} of ${rawCategories.length} assignment groups were kept.`)
+  }
+  const categories = rawCategories
+    .slice(0, MAX_CATEGORIES)
+    .map((cat) => cleanCategory(cat, items))
+    .filter(notNull)
+
+  const rawScheme = arr(c.scheme)
+  if (rawScheme.length > MAX_CUTS) warnings.push(`${label}: only the first ${MAX_CUTS} rows of the letter scheme were kept.`)
+
   return {
     source: kind, // the payload's kind decides the source, whatever the course claims
     sourceId,
@@ -134,12 +193,12 @@ function cleanCourse(c: unknown, kind: SyncPayload['kind'], at: string): SyncedC
       .map(courseNumber)
       .filter((n): n is string => n !== null)
       .slice(0, 10),
-    title: str(c.title, MAX_NAME) ?? '',
+    title,
     term: str(c.term, 60),
     url: safeUrl(c.url) ?? siteRoot,
     weighted: c.weighted === true,
-    categories: arr(c.categories).slice(0, MAX_CATEGORIES).map(cleanCategory).filter(notNull),
-    items: arr(c.items).slice(0, MAX_ITEMS).map(cleanItem).filter(notNull),
+    categories,
+    items,
     canvasScore: num(c.canvasScore),
     canvasGrade: str(c.canvasGrade, 10),
     scheme: cleanScheme(c.scheme),
@@ -147,16 +206,18 @@ function cleanCourse(c: unknown, kind: SyncPayload['kind'], at: string): SyncedC
   }
 }
 
-function cleanCategory(c: unknown): SyncedCategory | null {
+/** One clean category. Drop counts are capped at how many items it has (more would only slow the grade math). */
+function cleanCategory(c: unknown, items: SyncedItem[]): SyncedCategory | null {
   if (!isObject(c)) return null
   const id = str(c.id, 100)
   if (!id) return null
+  const size = items.filter((i) => i.categoryId === id).length
   return {
     id,
     name: str(c.name, MAX_NAME) ?? '',
     weight: num(c.weight),
-    dropLowest: count(c.dropLowest),
-    dropHighest: count(c.dropHighest),
+    dropLowest: Math.min(count(c.dropLowest), size),
+    dropHighest: Math.min(count(c.dropHighest), size),
     neverDrop: arr(c.neverDrop)
       .map((d) => str(d, 100))
       .filter(notNull)
@@ -186,7 +247,7 @@ function cleanItem(i: unknown): SyncedItem | null {
 function cleanScheme(s: unknown): GradeCut[] | null {
   if (!Array.isArray(s)) return null
   const cuts: GradeCut[] = []
-  for (const cut of s.slice(0, 30)) {
+  for (const cut of s.slice(0, MAX_CUTS)) {
     if (!isObject(cut)) continue
     const letter = str(cut.letter, 10)
     const min = num(cut.min)
@@ -207,6 +268,11 @@ function arr(x: unknown): unknown[] {
 
 function notNull<T>(x: T | null): x is T {
   return x !== null
+}
+
+/** "1 course", "3 courses". */
+function plural(n: number, word: string): string {
+  return `${n} ${word}${n === 1 ? '' : 's'}`
 }
 
 /** A string cut to `max` characters, or null for anything that is not a non-empty string. */

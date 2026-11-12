@@ -5,6 +5,7 @@
 // It also holds small pure helpers that return an updated copy of the store or of one course's prefs, so React
 // state updates stay one-liners in the components and are easy to test.
 import { APP_SLUG } from './brand'
+import { canonicalTerm } from './courseNumber'
 import type { CoursePrefs, GradeCut, ManualCourse, ManualItem, Settings, Store, SyncedCourse, SyncPayload } from '../types'
 
 export const STORE_KEY = `${APP_SLUG}:v1`
@@ -65,10 +66,65 @@ function numberOrNull(x: unknown): number | null {
   return typeof x === 'number' && Number.isFinite(x) ? x : null
 }
 
+// A key like "__proto__" in a hand-edited file would change an object's prototype when copied, so skip it.
+const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
+
+/** Only the strings of a list (or undefined when it is not a list). */
+function stringList(x: unknown): string[] | undefined {
+  return Array.isArray(x) ? x.filter((v): v is string => typeof v === 'string') : undefined
+}
+
+/** Only the entries of a map whose value passes `keep` (or undefined when it is not a map). */
+function recordOf<T>(x: unknown, keep: (v: unknown) => v is T): Record<string, T> | undefined {
+  if (!isObject(x)) return undefined
+  const out: Record<string, T> = {}
+  for (const [k, v] of Object.entries(x)) if (!UNSAFE_KEYS.has(k) && keep(v)) out[k] = v
+  return out
+}
+
+const isFiniteNumber = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
+const isString = (v: unknown): v is string => typeof v === 'string'
+
 /**
- * Loosely checks that `x` looks like a saved Store and returns a clean copy (or null if it clearly is not one).
- * Used when loading from localStorage and when importing a file. "Loosely" on purpose: the merge code already
- * tolerates odd values, we just make sure the top-level shape is right so nothing crashes on `.map` of undefined.
+ * Rebuilds one course's prefs field by field, keeping only values of the right type. An imported file with
+ * "ignored": 5 or "letter": {} would otherwise crash the grade math (`new Set(5)`, `letter.trim()`).
+ */
+function parsePrefs(p: Record<string, unknown>): CoursePrefs {
+  const units = numberOrNull(p.units)
+  const out: CoursePrefs = {
+    units: units !== null && units >= 0 ? units : undefined,
+    letter: typeof p.letter === 'string' && p.letter.trim() !== '' ? p.letter.trim().slice(0, 10) : undefined,
+    passFail: typeof p.passFail === 'boolean' ? p.passFail : undefined,
+    hidden: typeof p.hidden === 'boolean' ? p.hidden : undefined,
+    weighted: typeof p.weighted === 'boolean' ? p.weighted : undefined,
+    weights: recordOf(p.weights, isFiniteNumber),
+    whatIf: recordOf(p.whatIf, isFiniteNumber),
+    whatIfGraded: stringList(p.whatIfGraded),
+    moved: recordOf(p.moved, isString),
+    ignored: stringList(p.ignored),
+    included: stringList(p.included),
+  }
+  if (Array.isArray(p.cutoffs)) {
+    out.cutoffs = p.cutoffs
+      .filter((c): c is GradeCut => isObject(c) && typeof c.letter === 'string' && c.letter.trim() !== '' && isFiniteNumber(c.min))
+      .map((c) => ({ letter: c.letter, min: c.min }))
+  }
+  if (Array.isArray(p.extra)) {
+    out.extra = p.extra
+      .filter(
+        (m): m is ManualItem =>
+          isObject(m) && typeof m.key === 'string' && m.key !== '' && isString(m.name) && isString(m.categoryKey) && isFiniteNumber(m.max),
+      )
+      .map((m) => ({ key: m.key, name: m.name, categoryKey: m.categoryKey, max: m.max }))
+  }
+  return cleanPrefs(out)
+}
+
+/**
+ * Checks that `x` looks like a saved Store and returns a clean copy (or null if it clearly is not one).
+ * Used when loading from localStorage and when importing a file. Synced courses are checked loosely (the merge
+ * code already tolerates odd values inside them); prefs are rebuilt field by field because the UI and grade
+ * math use them directly.
  */
 export function parseStore(x: unknown): Store | null {
   if (!isObject(x) || x.v !== 1) return null
@@ -77,13 +133,13 @@ export function parseStore(x: unknown): Store | null {
   const synced: Record<string, SyncedCourse> = {}
   for (const [key, c] of Object.entries(x.synced)) {
     // A synced course must at least have lists we can loop over.
-    if (isObject(c) && Array.isArray(c.items) && Array.isArray(c.categories)) synced[key] = c as unknown as SyncedCourse
+    if (!UNSAFE_KEYS.has(key) && isObject(c) && Array.isArray(c.items) && Array.isArray(c.categories)) synced[key] = c as unknown as SyncedCourse
   }
 
   const manual = x.manual.filter((m): m is ManualCourse => isObject(m) && typeof m.key === 'string')
 
   const prefs: Record<string, CoursePrefs> = {}
-  for (const [key, p] of Object.entries(x.prefs)) if (isObject(p)) prefs[key] = p as CoursePrefs
+  for (const [key, p] of Object.entries(x.prefs)) if (!UNSAFE_KEYS.has(key) && isObject(p)) prefs[key] = parsePrefs(p)
 
   const s = isObject(x.settings) ? x.settings : {}
   const settings: Settings = {
@@ -125,20 +181,41 @@ export function exportStoreJson(store: Store): string {
 }
 
 /**
- * Puts a sync result into the store: every course from that source is replaced by the new list (so courses you
- * dropped disappear), courses from the other source are kept. Prefs are keyed by merged course, so they survive.
+ * Puts a sync result into the store. Pure: returns a new store and never changes the old one.
+ *
+ * Rules (a sync only sees part of the picture, so it only replaces what it actually saw):
+ *  1. A payload with no courses changes no course data, only the sync time. An empty list usually means the
+ *     site's page changed or it is between terms, not that every class was dropped.
+ *  2. A course the sync could not read (its sourceId is in payload.failedIds) keeps its stored copy.
+ *  3. A stored course from this source is replaced or removed only if the payload has the same course, or the
+ *     payload covers its term. So a class you dropped this term disappears, but last term's classes (which Canvas
+ *     and Gradescope stop listing once a term ends) stay with their final grades.
+ * Courses from other sources are never touched. Prefs are keyed by merged course, so they survive.
  */
 export function applyPayload(store: Store, payload: SyncPayload): Store {
-  // A real sync replaces the sample data entirely (never mix demo courses with real ones).
-  if (store.demo) store = { ...defaultStore(), settings: store.settings }
+  // A real sync replaces the sample data (never mix demo courses with real ones), keeping hand-added classes.
+  if (store.demo) store = withoutDemo(store)
+  const lastSync = { ...store.lastSync, [payload.kind]: payload.at }
+  if (payload.courses.length === 0) return { ...store, lastSync } // rule 1
+
+  const failed = new Set(payload.failedIds ?? [])
+  const inPayload = new Set(payload.courses.map((c) => c.sourceId))
+  const termsInPayload = new Set(payload.courses.map((c) => canonicalTerm(c.term)))
+
   const synced: Record<string, SyncedCourse> = {}
   for (const [key, course] of Object.entries(store.synced)) {
-    if (course.source !== payload.kind) synced[key] = course
+    const replaced =
+      course.source === payload.kind &&
+      !failed.has(course.sourceId) && // rule 2
+      (inPayload.has(course.sourceId) || termsInPayload.has(canonicalTerm(course.term))) // rule 3
+    if (!replaced) synced[key] = course
   }
   for (const course of payload.courses) {
-    synced[`${payload.kind}:${course.sourceId}`] = { ...course, source: payload.kind }
+    const key = `${payload.kind}:${course.sourceId}`
+    if (failed.has(course.sourceId) && synced[key]) continue // rule 2: the stored copy is better than a broken one
+    synced[key] = { ...course, source: payload.kind }
   }
-  return { ...store, synced, lastSync: { ...store.lastSync, [payload.kind]: payload.at } }
+  return { ...store, synced, lastSync }
 }
 
 export function updateSettings(store: Store, patch: Partial<Settings>): Store {
@@ -170,9 +247,19 @@ export function cleanPrefs(p: CoursePrefs): CoursePrefs {
   return out as CoursePrefs
 }
 
-/** Applies `change` to one course's prefs and returns the new store. */
-export function updatePrefs(store: Store, courseKey: string, change: (p: CoursePrefs) => CoursePrefs): Store {
-  const next = cleanPrefs(change({ ...(store.prefs[courseKey] ?? {}) }))
+/**
+ * Applies `change` to one course's prefs and returns the new store.
+ * `current` (optional) is the course's prefs as the app shows them (Course.prefs, where item keys from before
+ * Canvas posted a column are already renamed to the current keys). Starting from it saves those renamed keys, so
+ * clearing a what-if or an ignore on the current key really clears it instead of the old key bringing it back.
+ */
+export function updatePrefs(
+  store: Store,
+  courseKey: string,
+  change: (p: CoursePrefs) => CoursePrefs,
+  current?: CoursePrefs,
+): Store {
+  const next = cleanPrefs(change({ ...(current ?? store.prefs[courseKey] ?? {}) }))
   const prefs = { ...store.prefs }
   if (Object.keys(next).length > 0) prefs[courseKey] = next
   else delete prefs[courseKey]
@@ -187,9 +274,15 @@ function setKey<T>(map: Record<string, T> | undefined, key: string, value: T | n
   return out
 }
 
-/** Sets (or clears, with null) a what-if score in points for one item. */
-export function withWhatIf(p: CoursePrefs, itemKey: string, score: number | null): CoursePrefs {
-  return { ...p, whatIf: setKey(p.whatIf, itemKey, score) }
+/**
+ * Sets (or clears, with null) a what-if score in points for one item.
+ * `onGraded` = the item already has a real score and the student typed over it. Those keys go in
+ * prefs.whatIfGraded so the what-if keeps applying after re-syncs; any other what-if stops once a real score lands.
+ */
+export function withWhatIf(p: CoursePrefs, itemKey: string, value: number | null, onGraded = false): CoursePrefs {
+  const graded = (p.whatIfGraded ?? []).filter((k) => k !== itemKey)
+  if (onGraded && value !== null) graded.push(itemKey)
+  return { ...p, whatIf: setKey(p.whatIf, itemKey, value), whatIfGraded: graded.length > 0 ? graded : undefined }
 }
 
 /** Sets (or clears) one category weight. Typing a weight means "use weights", so weighted turns on. */
@@ -281,6 +374,16 @@ export function clearAll(): void {
 
 // ---------------------------------------------------------------- demo
 
+/**
+ * The store without the sample data: demo courses, their prefs and sync times go; settings and classes the
+ * student added by hand during the demo (and those classes' prefs) stay, because those are real.
+ */
+function withoutDemo(store: Store): Store {
+  const prefs: Record<string, CoursePrefs> = {}
+  for (const m of store.manual) if (store.prefs[m.key]) prefs[m.key] = store.prefs[m.key]
+  return { ...defaultStore(), settings: store.settings, manual: store.manual, prefs }
+}
+
 /** Load the made-up sample grades from "See a demo", keeping the student's settings. */
 export function loadDemo(store: Store, payloads: SyncPayload[]): Store {
   let next: Store = { ...defaultStore(), settings: { ...store.settings, term: null } }
@@ -288,7 +391,7 @@ export function loadDemo(store: Store, payloads: SyncPayload[]): Store {
   return { ...next, demo: true }
 }
 
-/** Remove the sample data again. */
+/** Remove the sample data again (classes added by hand are kept). */
 export function clearDemo(store: Store): Store {
-  return { ...defaultStore(), settings: store.settings }
+  return withoutDemo(store)
 }

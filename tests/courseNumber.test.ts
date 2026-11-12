@@ -1,6 +1,6 @@
-// Tests for finding CMU course numbers in Canvas / Gradescope text.
+// Tests for finding CMU course numbers and reading term names in Canvas / Gradescope / Autolab text.
 import { describe, expect, test } from 'vitest'
-import { parseCourseNumbers } from '../src/lib/courseNumber'
+import { canonicalTerm, parseCourseNumbers, termSortKey } from '../src/lib/courseNumber'
 
 describe('parseCourseNumbers', () => {
   test.each([
@@ -51,5 +51,26 @@ describe('parseCourseNumbers', () => {
 
   test('a number glued to a 4-digit year is not a course', () => {
     expect(parseCourseNumbers('F2026123').number).toBeNull()
+  })
+})
+
+describe('term names', () => {
+  test('termSortKey orders terms and reads short codes', () => {
+    expect(termSortKey('Fall 2026')).toBe(20263)
+    expect(termSortKey('f26')).toBe(20263)
+    expect(termSortKey('2026 Spring')).toBe(20261)
+    expect(termSortKey(undefined)).toBe(-1)
+  })
+
+  test('canonicalTerm turns every spelling of a term into one', () => {
+    for (const t of ['Fall 2026', 'fall 2026', 'FALL 2026', 'F26', ' Fall\t2026 ', '2026 Fall']) expect(canonicalTerm(t)).toBe('Fall 2026')
+    for (const t of ['Summer 2026', 'Summer One 2026', 'Summer II 2026', 'M26', 'N26']) expect(canonicalTerm(t)).toBe('Summer 2026')
+    expect(canonicalTerm('Spring 2027')).toBe('Spring 2027')
+  })
+
+  test('canonicalTerm keeps unknown terms (tidied) and turns empty ones into null', () => {
+    expect(canonicalTerm('Mini  4')).toBe('Mini 4')
+    expect(canonicalTerm('   ')).toBeNull()
+    expect(canonicalTerm(null)).toBeNull()
   })
 })

@@ -151,38 +151,47 @@ export async function syncAutolab(
   const refs = parseAutolabCourses(list.html).filter((r) => r.status.includes('current'))
   const warnings: string[] = []
   const courses: SyncedCourse[] = []
+  const failedIds: string[] = [] // courses we could not read: the app keeps their previously stored copy
   const at = new Date().toISOString()
   // One request at a time: Autolab is a small CMU server, be gentle.
   for (const [i, ref] of refs.entries()) {
     progress(`Autolab: ${i + 1} of ${refs.length} courses`)
+    let page: { html: string; url: string }
     try {
-      const page = await fetchPage(ref.gradebookPath)
-      const path = new URL(page.url, AUTOLAB_ORIGIN).pathname
-      if (path.endsWith('/edit')) {
-        warnings.push(`Autolab: set your nickname in ${ref.name} first, then sync again`)
-        continue
-      }
-      const { categories, items } = parseAutolabGradebook(page.html)
-      const { number, also } = parseCourseNumbers(ref.slug, ref.name)
-      courses.push({
-        source: 'autolab',
-        sourceId: ref.slug,
-        number,
-        alsoNumbers: also,
-        title: ref.name.replace(/\s*\([^)]*\)\s*$/, '') || ref.slug,
-        term: termFromAutolabName(ref.name, ref.slug),
-        url: `${AUTOLAB_ORIGIN}/courses/${ref.slug}`,
-        weighted: false,
-        categories,
-        items,
-        canvasScore: null,
-        canvasGrade: null,
-        scheme: null,
-        syncedAt: at,
-      })
+      page = await fetchPage(ref.gradebookPath)
     } catch (err) {
       warnings.push(`Autolab: couldn't read ${ref.name} (${err instanceof Error ? err.message : String(err)})`)
+      failedIds.push(ref.slug)
+      continue
     }
+    const path = new URL(page.url, AUTOLAB_ORIGIN).pathname
+    // The session ran out mid-sync (Autolab redirected to its login page). Without this check the login page
+    // would look like a gradebook with zero assignments and replace the good stored copy.
+    if (path.startsWith('/auth/')) throw new Error('Log in to Autolab first')
+    if (path.endsWith('/edit')) {
+      warnings.push(`Autolab: set your nickname in ${ref.name} first, then sync again`)
+      failedIds.push(ref.slug)
+      continue
+    }
+    // The parsers never throw (a missing element is skipped), so no try/catch is needed here.
+    const { categories, items } = parseAutolabGradebook(page.html)
+    const { number, also } = parseCourseNumbers(ref.slug, ref.name)
+    courses.push({
+      source: 'autolab',
+      sourceId: ref.slug,
+      number,
+      alsoNumbers: also,
+      title: ref.name.replace(/\s*\([^)]*\)\s*$/, '') || ref.slug,
+      term: termFromAutolabName(ref.name, ref.slug),
+      url: `${AUTOLAB_ORIGIN}/courses/${ref.slug}`,
+      weighted: false,
+      categories,
+      items,
+      canvasScore: null,
+      canvasGrade: null,
+      scheme: null,
+      syncedAt: at,
+    })
   }
-  return { v: 1, kind: 'autolab', at, courses, warnings }
+  return { v: 1, kind: 'autolab', at, courses, warnings, failedIds }
 }

@@ -32,8 +32,8 @@ function textOf(el: Element | null | undefined): string {
 }
 
 /**
- * Stable fallback id for a row with no link (e.g. "No Submission" rows). Lowercase letters and digits
- * only, and leading zeros dropped in digit runs, so "HW01" and "hw 1" give the same id.
+ * Normalized assignment name used as the item id. Lowercase letters and digits only, and leading zeros
+ * dropped in digit runs, so "HW01" and "hw 1" give the same id.
  * (Kept local so this module does not depend on the merge module.)
  */
 function slugName(name: string): string {
@@ -179,8 +179,10 @@ function parseRow(row: Element): SyncedItem | null {
 
   const link = nameCell.querySelector('a')
   const href = link?.getAttribute('href') ?? ''
-  const assignmentMatch = href.match(/\/courses\/\d+\/assignments\/(\d+)/)
-  const id = assignmentMatch ? assignmentMatch[1] : `name:${slugName(name)}`
+  // The id is always name-based, never the assignment number from the link: an assignment has no link
+  // until you submit it, so a link-based id would change on submission and lose the student's what-ifs
+  // and other per-item settings. parseCoursePage adds "#2", "#3" when two rows share a name.
+  const id = `name:${slugName(name)}`
   // Only trust relative Gradescope links; anything else could point off-site.
   const url = href.startsWith('/courses/') ? GRADESCOPE_ORIGIN + href : null
 
@@ -208,7 +210,7 @@ function parseRow(row: Element): SyncedItem | null {
 /** Title, term and assignment rows from a Gradescope course page. */
 export function parseCoursePage(
   html: string,
-  _courseId: string, // part of the shared signature; ids from Gradescope are already unique per course
+  _courseId: string, // part of the shared signature; item ids only need to be unique within one course
 ): { term: string | null; title: string | null; items: SyncedItem[] } {
   const doc = toDoc(html)
   const title = textOf(doc.querySelector('.courseHeader--title')) || null
@@ -223,7 +225,7 @@ export function parseCoursePage(
   for (const row of rows) {
     const item = parseRow(row)
     if (!item) continue
-    // Two unlinked rows with the same name would share an id: make the later ones unique.
+    // Two rows with the same name would share an id: make the later ones unique ("name:quiz#2").
     let id = item.id
     for (let n = 2; usedIds.has(id); n++) id = `${item.id}#${n}`
     usedIds.add(id)
@@ -232,7 +234,25 @@ export function parseCoursePage(
   return { term, title, items }
 }
 
+/**
+ * True when the HTML really is a course page (it has the course header or the student table).
+ * When the session expires mid-sync, Gradescope serves the login or home page for /courses/<id> instead,
+ * which has no assignment rows and would otherwise look like a course with zero assignments.
+ */
+export function isCoursePage(html: string): boolean {
+  const doc = toDoc(html)
+  return doc.querySelector('.courseHeader, #assignments-student-table') !== null
+}
+
+/** True when the HTML is Gradescope's login form (it asks for a password). */
+function isLoginPage(html: string): boolean {
+  return toDoc(html).querySelector('input[type="password"], form[action*="/login"]') !== null
+}
+
 // ---------------------------------------------------------------- full sync
+
+/** Thrown when Gradescope logs the student out partway through: the whole sync stops. */
+class LoggedOutError extends Error {}
 
 /**
  * Sync every active student course. `fetchText(path)` returns the HTML for a same-origin path
@@ -251,6 +271,7 @@ export async function syncGradescope(
 
   const refs = parseCourseList(home)
   const warnings: string[] = []
+  const failedIds: string[] = [] // courses we could not read: the app keeps their previously stored copy
   const at = new Date().toISOString()
   let done = 0
 
@@ -258,7 +279,13 @@ export async function syncGradescope(
   const results = await mapLimit(refs, 1, async (ref, i): Promise<SyncedCourse | null> => {
     if (i > 0) await new Promise((resolve) => setTimeout(resolve, 300))
     try {
-      const page = parseCoursePage(await fetchText(`/courses/${ref.id}`), ref.id)
+      const html = await fetchText(`/courses/${ref.id}`)
+      if (!isCoursePage(html)) {
+        // The session ran out mid-sync: every later page would be the login page too, so stop the whole sync.
+        if (isLoginPage(html)) throw new LoggedOutError('Log in to Gradescope first')
+        throw new Error('got a different page instead of the course')
+      }
+      const page = parseCoursePage(html, ref.id)
       const { number, also } = parseCourseNumbers(ref.shortName, ref.name)
       return {
         source: 'gradescope',
@@ -277,8 +304,10 @@ export async function syncGradescope(
         syncedAt: at,
       }
     } catch (err) {
+      if (err instanceof LoggedOutError) throw err
       const why = err instanceof Error ? err.message : String(err)
       warnings.push(`Gradescope: couldn't read ${ref.shortName || ref.name || ref.id} (${why})`)
+      failedIds.push(ref.id) // left out of `courses`, so tell the app to keep the stored copy
       return null
     } finally {
       done++
@@ -287,5 +316,5 @@ export async function syncGradescope(
   })
 
   const courses = results.filter((c): c is SyncedCourse => c !== null)
-  return { v: 1, kind: 'gradescope', at, courses, warnings }
+  return { v: 1, kind: 'gradescope', at, courses, warnings, failedIds }
 }

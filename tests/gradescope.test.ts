@@ -16,7 +16,7 @@ vi.mock('../src/lib/courseNumber', () => ({
   },
 }))
 
-import { hasCourseList, parseCourseList, parseCoursePage, parseGsDate, syncGradescope } from '../src/sync/gradescope'
+import { hasCourseList, isCoursePage, parseCourseList, parseCoursePage, parseGsDate, syncGradescope } from '../src/sync/gradescope'
 
 // Vite's ?raw suffix imports a file as a string (works in vitest without Node type definitions).
 import HOME from './fixtures/gradescope-home.html?raw'
@@ -92,6 +92,15 @@ describe('hasCourseList', () => {
   })
 })
 
+describe('isCoursePage', () => {
+  test('a course page has the header or the student table; home and login pages do not', () => {
+    expect(isCoursePage(COURSE)).toBe(true)
+    expect(isCoursePage('<table id="assignments-student-table"></table>')).toBe(true)
+    expect(isCoursePage(HOME)).toBe(false)
+    expect(isCoursePage('<form action="/login"><input type="password"></form>')).toBe(false)
+  })
+})
+
 describe('parseCoursePage', () => {
   const page = parseCoursePage(COURSE, '1000002')
   const byName = (name: string) => page.items.find((i) => i.name === name)!
@@ -103,7 +112,7 @@ describe('parseCoursePage', () => {
   })
   test('graded row: score, max, id, url and due date', () => {
     expect(byName('HW01')).toEqual({
-      id: '5000001',
+      id: 'name:hw1', // name-based even though the row links to the assignment
       name: 'HW01',
       categoryId: null,
       score: 36,
@@ -150,6 +159,24 @@ describe('parseCoursePage', () => {
     expect(items.map((i) => i.url)).toEqual([null, null])
     expect(items[1].id).toBe('name:b')
   })
+  test('the id stays the same when the student submits (the row gains a link)', () => {
+    const before = `<table id="assignments-student-table"><tbody><tr><th>HW 3</th>
+      <td class="submissionStatus"><div class="submissionStatus--text">No Submission</div></td></tr></tbody></table>`
+    const after = `<table id="assignments-student-table"><tbody><tr>
+      <th><a href="/courses/1/assignments/55/submissions/99">HW 3</a></th>
+      <td class="submissionStatus"><div class="submissionStatus--text">Submitted</div></td></tr></tbody></table>`
+    const a = parseCoursePage(before, '1').items[0]
+    const b = parseCoursePage(after, '1').items[0]
+    expect(a.id).toBe('name:hw3')
+    expect(b.id).toBe(a.id) // what-ifs and other per-item settings keyed by it keep working
+    expect(b.status).toBe('submitted')
+  })
+  test('duplicate names get #2, #3 suffixes, linked or not', () => {
+    const html = `<table id="assignments-student-table"><tbody>
+      <tr><th><a href="/courses/1/assignments/7/submissions/1">Quiz</a></th><td></td></tr>
+      <tr><th>Quiz</th><td></td></tr><tr><th>quiz</th><td></td></tr></tbody></table>`
+    expect(parseCoursePage(html, '1').items.map((i) => i.id)).toEqual(['name:quiz', 'name:quiz#2', 'name:quiz#3'])
+  })
   test('duplicate unlinked names get unique ids', () => {
     const html = `<table id="assignments-student-table"><tbody>
       <tr><th>Quiz</th><td></td></tr><tr><th>Quiz</th><td></td></tr><tr><th>  </th><td></td></tr></tbody></table>`
@@ -162,7 +189,7 @@ describe('parseCoursePage', () => {
     const p = parseCoursePage(html, '9')
     expect(p.term).toBeNull()
     expect(p.items).toHaveLength(1)
-    expect(p.items[0]).toMatchObject({ id: '77', score: 5, max: 10 })
+    expect(p.items[0]).toMatchObject({ id: 'name:hw1', score: 5, max: 10 })
   })
   test('empty or broken pages give no items instead of throwing', () => {
     expect(parseCoursePage('', '1')).toEqual({ term: null, title: null, items: [] })
@@ -195,6 +222,7 @@ describe('syncGradescope', () => {
     expect(payload.v).toBe(1)
     expect(payload.kind).toBe('gradescope')
     expect(payload.warnings).toEqual([])
+    expect(payload.failedIds).toEqual([])
     expect(payload.courses).toHaveLength(5)
     expect(calls).not.toContain('/courses/800006') // inactive course never fetched
     expect(progress.at(-1)).toBe('Gradescope: 5 of 5 courses')
@@ -232,11 +260,27 @@ describe('syncGradescope', () => {
     expect(payload.courses[0]).toMatchObject({ term: 'Fall 2026', number: '36225', title: '36225' })
   })
 
-  test('a failing course becomes a warning, the rest still sync', async () => {
+  test('a failing course becomes a warning and a failed id, the rest still sync', async () => {
     const { fetchText } = fakeFetch({ '/': HOME_TA, '/courses/1000002': COURSE, '/courses/1000007': new Error('HTTP 500') })
     const payload = await syncGradescope(fetchText)
     expect(payload.courses.map((c) => c.sourceId)).toEqual(['1000002'])
     expect(payload.warnings).toEqual(["Gradescope: couldn't read 36202 (HTTP 500)"])
+    expect(payload.failedIds).toEqual(['1000007']) // the app keeps its stored copy of this course
+  })
+
+  test('a page that is not a course page is a failed course, not an empty one', async () => {
+    // e.g. Gradescope sent its home page instead of the course
+    const { fetchText } = fakeFetch({ '/': HOME_TA, '/courses/1000002': COURSE, '/courses/1000007': HOME_TA })
+    const payload = await syncGradescope(fetchText)
+    expect(payload.courses.map((c) => c.sourceId)).toEqual(['1000002'])
+    expect(payload.failedIds).toEqual(['1000007'])
+    expect(payload.warnings[0]).toMatch(/couldn't read 36202/)
+  })
+
+  test('getting logged out mid-sync stops the whole sync', async () => {
+    const login = '<html><body><form action="/login" method="post"><input name="session[email]"><input type="password" name="session[password]"></form></body></html>'
+    const { fetchText } = fakeFetch({ '/': HOME_TA, '/courses/1000002': COURSE, '/courses/1000007': login })
+    await expect(syncGradescope(fetchText)).rejects.toThrow('Log in to Gradescope first')
   })
 
   test('throws a clear error when logged out', async () => {

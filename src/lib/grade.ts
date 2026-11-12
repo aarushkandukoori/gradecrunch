@@ -56,10 +56,60 @@ function meetsCut(percent: number | null, min: number): boolean {
   return roundPercent(Math.max(percent, 0)) >= roundPercent(min)
 }
 
-/** The score to use for an item: a what-if if there is one, else the real score (null = no score). */
-function effectiveScore(item: Item, whatIf: Record<string, number>): number | null {
-  if (Object.hasOwn(whatIf, item.key) && Number.isFinite(whatIf[item.key])) return whatIf[item.key]
-  return item.score
+/**
+ * The score to use for an item (null = no score yet).
+ *  - A what-if on an item whose max is unknown ("Points unknown") is ignored: with no points possible it
+ *    would count as pure extra credit and push the grade past 100%.
+ *  - A what-if on an item that has a real score only applies if the student typed it over that real score
+ *    (its key is in `whatIfGraded`). A what-if typed while the item was still ungraded stops applying once
+ *    the real grade comes out, so the dashboard never shows a made-up number as the current grade.
+ */
+function effectiveScore(item: Item, whatIf: Record<string, number>, whatIfGraded: Set<string>): number | null {
+  const hasWhatIf = Object.hasOwn(whatIf, item.key) && Number.isFinite(whatIf[item.key])
+  if (!hasWhatIf || item.max === null) return item.score
+  if (item.score !== null && !whatIfGraded.has(item.key)) return item.score
+  return whatIf[item.key]
+}
+
+/** Does this item count toward the grade at all? Canvas skips omitted ("do not count") and excused items. */
+export function isCountable(item: Item, ignored: Set<string>): boolean {
+  return !item.omit && item.status !== 'excused' && !ignored.has(item.key)
+}
+
+/** Category names that are bonus points, not required work (never planned for as "work to go"). */
+const BONUS_NAME = /extra|bonus/i
+
+/**
+ * Weighted categories that have nothing worth points yet (e.g. "Final Exam 30%" before the exam is posted).
+ * When planning ("what do I need"), each one gets a stand-in 100-point item, because that weight still has to
+ * be earned. Two guards so we don't plan for points that aren't really required:
+ *  - categories named like "Extra Credit" / "Bonus" are skipped,
+ *  - we only add them while the total weight in play (categories with points + planned ones) stays at or under
+ *    100%, biggest weights first. A 5% "Participation" on top of weights that already reach 100% is bonus.
+ * Only depends on the course (not on what-ifs), so the dashboard can show the same list as "to go".
+ */
+export function plannedCategories(course: Course): Category[] {
+  if (!course.weighted) return []
+  const ignored = new Set(course.prefs.ignored ?? [])
+  // Categories that already have points possible (graded or still to come with a known max).
+  const hasPoints = new Set<string>()
+  for (const item of course.items) {
+    if (isCountable(item, ignored) && item.max !== null && item.max > 0) hasPoints.add(item.categoryKey)
+  }
+  let used = 0
+  for (const cat of course.categories) if (hasPoints.has(cat.key)) used += cat.weight ?? 0
+
+  const empty = course.categories
+    .filter(c => (c.weight ?? 0) > 0 && !hasPoints.has(c.key) && !BONUS_NAME.test(c.name))
+    .sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0))
+  const planned: Category[] = []
+  for (const cat of empty) {
+    const w = cat.weight ?? 0
+    if (used + w > 100 + 1e-9) continue // would push the total past 100%: treat as bonus
+    used += w
+    planned.push(cat)
+  }
+  return planned
 }
 
 // ------------------------------------------------------------------ drop rules
@@ -150,12 +200,27 @@ export function keepBestBisection(entries: Entry[], keep: number, fixed: Entry[]
     return { kept, value }
   }
 
-  for (let i = 0; i < 100 && hi - lo > 1e-12; i++) {
-    const mid = (lo + hi) / 2
-    if (pick(mid).value >= 0) lo = mid
-    else hi = mid
+  // Shortcut: each item's value is a straight line in q, so if the same items are the top `keep` at both lo
+  // and hi, they are the top `keep` everywhere in between, and the search can stop. This usually ends the
+  // search long before 100 steps (big groups were slow enough to freeze the page).
+  let atLo = pick(lo).kept
+  let atHi = pick(hi).kept
+  const sameSet = (a: Entry[], b: Entry[]) => {
+    const inA = new Set(a)
+    return b.every(e => inA.has(e))
   }
-  const keptSet = new Set(pick((lo + hi) / 2).kept)
+  for (let i = 0; i < 100 && hi - lo > 1e-12 && !sameSet(atLo, atHi); i++) {
+    const mid = (lo + hi) / 2
+    const atMid = pick(mid)
+    if (atMid.value >= 0) {
+      lo = mid
+      atLo = atMid.kept
+    } else {
+      hi = mid
+      atHi = atMid.kept
+    }
+  }
+  const keptSet = new Set(sameSet(atLo, atHi) ? atLo : pick((lo + hi) / 2).kept)
   return entries.filter(e => keptSet.has(e)) // keep the original order
 }
 
@@ -234,8 +299,11 @@ function categoriesWithOrphans(course: Course): Category[] {
 
 function computeGrade(course: Course, opts: GradeOptions): GradeDetail {
   const whatIf = opts.whatIf ?? {}
+  const whatIfGraded = new Set(course.prefs.whatIfGraded ?? [])
   const fill = typeof opts.fillRemaining === 'number' ? opts.fillRemaining : null
   const ignored = new Set(course.prefs.ignored ?? [])
+  // Only needed when planning; skip the work for the plain current grade.
+  const planned = fill !== null ? new Set(plannedCategories(course).map(c => c.key)) : new Set<string>()
 
   let graded = 0
   let remaining = 0
@@ -247,10 +315,9 @@ function computeGrade(course: Course, opts: GradeOptions): GradeDetail {
     const entries: Entry[] = []
     for (const item of course.items) {
       if (item.categoryKey !== cat.key) continue
-      // Countable: Canvas skips omitted ("do not count toward final grade") and excused items.
-      if (item.omit || item.status === 'excused' || ignored.has(item.key)) continue
+      if (!isCountable(item, ignored)) continue
 
-      const score = effectiveScore(item, whatIf)
+      const score = effectiveScore(item, whatIf, whatIfGraded)
       if (score !== null) {
         graded++
         // Canvas parseScore turns a missing points_possible into 0, so a score with no max is extra credit.
@@ -268,8 +335,8 @@ function computeGrade(course: Course, opts: GradeOptions): GradeDetail {
     }
 
     // When planning, a weighted category with no points possible yet (e.g. "Final Exam", not posted)
-    // still has to be earned: stand in one 100-point item for it.
-    if (fill !== null && course.weighted && (cat.weight ?? 0) > 0 && sumMax(entries) === 0) {
+    // still has to be earned: stand in one 100-point item for it (see plannedCategories for which ones).
+    if (fill !== null && planned.has(cat.key)) {
       entries.push({ key: `virtual:${cat.key}`, score: fill * 100, max: 100 })
       virtual++
     }
@@ -342,43 +409,65 @@ export function letterFor(percent: number | null, scheme: GradeCut[]): string | 
   return (cut ?? sorted[sorted.length - 1]).letter
 }
 
+/** At most this many letters get a "what you need" row. Real schemes have about 13; this caps the work. */
+const MAX_CUTS = 15
+
 /**
  * For each letter (except the lowest), the average percent needed on all remaining work to get it.
- * "Remaining work" = countable items with no score and a known max, plus weighted categories with nothing
- * in them yet. Remaining items with an unknown max are ignored (we can't know what they're worth).
+ * "Remaining work" = countable items with no score and a known max, plus planned stand-ins for empty weighted
+ * categories (see plannedCategories).
+ *  - Nothing left at all: every letter is 'locked' (the UI compares the percent to say "Locked in" or not).
+ *  - Work left, but none of it has a known point value (Gradescope hides max until graded): 'unknown'.
+ *  - No grade can be computed even with 100% on the rest: [] (no rows).
+ * Remaining items with an unknown max next to items with a known max are left out of the math (the UI notes it).
  */
 export function neededForLetters(course: Course, whatIf: Record<string, number> = {}): NeededResult[] {
   const sorted = [...course.scheme].sort((a, b) => b.min - a.min)
-  const cuts = sorted.slice(0, -1) // the lowest letter (R/F) is always "reached"
-  const gradeAt = (x: number) => computeGrade(course, { whatIf, fillRemaining: x })
+  // The lowest letter (R/F) is always "reached". Cap the rest so a huge scheme can't freeze the page.
+  const cuts = sorted.slice(0, -1).slice(0, MAX_CUTS)
 
-  const atOne = gradeAt(1)
-  const hasRemaining = atOne.filled + atOne.virtual > 0
-  const current = gradeCourse(course, { whatIf }).percent
+  // The grade with an average of k/1000 (k = 0..1000, so steps of 0.1%) on all remaining work.
+  // Remembered, because different letters ask for the same k.
+  const cache = new Map<number, GradeDetail>()
+  const gradeAt = (k: number): GradeDetail => {
+    let detail = cache.get(k)
+    if (!detail) {
+      detail = computeGrade(course, { whatIf, fillRemaining: k / 1000 })
+      cache.set(k, detail)
+    }
+    return detail
+  }
+
+  const now = computeGrade(course, { whatIf }).result
+  const atFull = gradeAt(1000)
+  const hasFillable = atFull.filled + atFull.virtual > 0
+
+  if (!hasFillable) {
+    // No grade at all and nothing we can plan for: there is nothing useful to say per letter.
+    if (now.percent === null) return []
+    // Work is still coming but we don't know what it's worth, so we can't say what's locked in or needed.
+    if (now.remaining > 0) return cuts.map(cut => ({ letter: cut.letter, min: cut.min, needed: null, status: 'unknown' }))
+    // Nothing left to grade: every letter is settled ('locked' = no remaining work; the percent says which you have).
+    return cuts.map(cut => ({ letter: cut.letter, min: cut.min, needed: null, status: 'locked' }))
+  }
+  // Even 100% on the rest gives no grade (e.g. the only work left sits in a 0% category).
+  if (atFull.result.percent === null) return []
+
   const atZero = gradeAt(0).result.percent
-  const atFull = atOne.result.percent
-
   return cuts.map(cut => {
     const base = { letter: cut.letter, min: cut.min }
-    if (!hasRemaining) {
-      // Nothing left to earn: you either have this letter or you don't.
-      return meetsCut(current, cut.min)
-        ? { ...base, needed: null, status: 'locked' as const }
-        : { ...base, needed: null, status: 'impossible' as const }
-    }
     if (meetsCut(atZero, cut.min)) return { ...base, needed: 0, status: 'guaranteed' as const }
-    if (!meetsCut(atFull, cut.min)) return { ...base, needed: null, status: 'impossible' as const }
+    if (!meetsCut(atFull.result.percent, cut.min)) return { ...base, needed: null, status: 'impossible' as const }
 
-    // Binary search for the smallest average x (0..1) on remaining work that earns the cut.
+    // Binary search for the smallest k (0.1% step) that earns the cut. k = 0 misses, k = 1000 earns.
+    // Searching whole 0.1% steps rounds the answer UP, so the shown number is always enough, in about 10 steps.
     let lo = 0 // known to miss
-    let hi = 1 // known to earn
-    for (let i = 0; i < 50; i++) {
-      const mid = (lo + hi) / 2
+    let hi = 1000 // known to earn
+    while (hi - lo > 1) {
+      const mid = Math.floor((lo + hi) / 2)
       if (meetsCut(gradeAt(mid).result.percent, cut.min)) hi = mid
       else lo = mid
     }
-    // Round UP to 0.1% so the shown number is always enough (the tiny epsilon absorbs float noise).
-    const needed = Math.min(100, Math.ceil(hi * 1000 - 1e-6) / 10)
-    return { ...base, needed, status: 'possible' as const }
+    return { ...base, needed: hi / 10, status: 'possible' as const }
   })
 }

@@ -2,11 +2,22 @@
 // All rounding for display happens here; the grade math itself never rounds.
 import type { ItemStatus } from '../types'
 import { formatCourseNumber } from './cmu'
+import { roundPercent } from './grade'
 
 /** 85.123 -> "85.1%". Empty string for missing values. */
 export function formatPercent(p: number | null | undefined, digits = 1): string {
   if (p == null || !Number.isFinite(p)) return ''
   return `${p.toFixed(digits)}%`
+}
+
+/**
+ * A course grade the way Canvas shows it: rounded to 2 decimals, without trailing zeros.
+ * 89.96 -> "89.96%", 84 -> "84%", 89.995 -> "90%". It uses the same rounding as the letter math (roundPercent),
+ * so the number never says 90 while the letter says B. (One decimal would turn 89.96 into "90.0%" next to a B.)
+ */
+export function formatGradePercent(p: number | null | undefined): string {
+  if (p == null || !Number.isFinite(p)) return ''
+  return `${roundPercent(p)}%`
 }
 
 /** 3.5149 -> "3.51". */

@@ -3,10 +3,16 @@
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import type { SyncPayload } from '../src/types'
 import { APP_NAME } from '../src/lib/brand'
-import { BOOKMARKLET_VERSION, bookmarkletHref, parseSyncFragment } from '../src/lib/bookmarklet'
+import {
+  BOOKMARKLET_VERSION,
+  bookmarkletHref,
+  isGradeSiteOrigin,
+  parseSyncFragment,
+  type IncomingMessage,
+} from '../src/lib/bookmarklet'
 import { decodePayload } from '../src/lib/payload'
 import { BOOKMARKLET_BUILT_VERSION, BOOKMARKLET_CODE } from '../src/generated/bookmarklet'
-import { detectSite, runSync, syncUrl, type RunDeps } from '../bookmarklet/run'
+import { detectSite, runSync, syncUrl, type ReceiverTab, type RunDeps } from '../bookmarklet/run'
 
 type GuardedWindow = Window & { __gradeSyncRunning?: boolean }
 
@@ -47,8 +53,12 @@ function fakeDeps(overrides: Partial<RunDeps> = {}): RunDeps & { navigated: stri
       return payload
     },
     syncAutolab: async () => ({ ...payload, kind: 'autolab', courses: [] }),
+    openReceiver: () => null, // popup blocked unless a test says otherwise: the fragment fallback
+    listen: () => () => {},
     navigate: (url) => navigated.push(url),
     alert: (msg) => alerts.push(msg),
+    timeoutMs: 30,
+    closeDelayMs: 30,
     navigated,
     alerts,
     ...overrides,
@@ -228,3 +238,244 @@ describe('runSync', () => {
     await first
   })
 })
+
+// ---------------------------------------------------------------- postMessage handoff (bookmarklet side)
+
+const SITE = 'https://example.pages.dev'
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+/** A fake message bus standing in for window 'message' events. */
+function fakeBus() {
+  const handlers: ((e: IncomingMessage) => void)[] = []
+  return {
+    handlers,
+    listen: (h: (e: IncomingMessage) => void) => {
+      handlers.push(h)
+      return () => handlers.splice(handlers.indexOf(h), 1)
+    },
+    emit: (e: IncomingMessage) => [...handlers].forEach((h) => h(e)),
+  }
+}
+
+/**
+ * A fake GradeCrunch tab. It says "ready" shortly after opening (unless told not to) and answers a sync
+ * message with `answer` (null = never answers).
+ */
+class FakeTab implements ReceiverTab {
+  closed = false
+  focused = 0
+  posted: { message: unknown; targetOrigin: string }[] = []
+  constructor(
+    private bus: ReturnType<typeof fakeBus>,
+    private answer: { ok: boolean; message?: string } | null = { ok: true },
+  ) {}
+  sayReady(origin = SITE, source: unknown = this) {
+    this.bus.emit({ source, origin, data: { type: 'gradecrunch:ready' } })
+  }
+  postMessage(message: unknown, targetOrigin: string) {
+    this.posted.push({ message, targetOrigin })
+    const answer = this.answer
+    if (answer) setTimeout(() => this.bus.emit({ source: this, origin: SITE, data: { type: 'gradecrunch:done', ...answer } }), 0)
+  }
+  focus() {
+    this.focused++
+  }
+  close() {
+    this.closed = true
+  }
+}
+
+/** Deps with a receiver tab that opens fine. `onOpen` runs right after the tab is "opened". */
+function handoffDeps(tab: FakeTab, bus: ReturnType<typeof fakeBus>, onOpen: () => void = () => setTimeout(() => tab.sayReady(), 0)) {
+  const order: string[] = []
+  const deps = fakeDeps({
+    siteOrigin: SITE,
+    openReceiver: (url) => {
+      order.push('open ' + url)
+      onOpen()
+      return tab
+    },
+    listen: bus.listen,
+    syncGradescope: async () => {
+      order.push('sync')
+      return payload
+    },
+  })
+  return { deps, order }
+}
+
+describe('runSync handoff to the GradeCrunch tab', () => {
+  test('happy path: opens the tab first, posts the grades to the exact origin, shows Done', async () => {
+    const bus = fakeBus()
+    const tab = new FakeTab(bus)
+    const { deps, order } = handoffDeps(tab, bus)
+    await runSync(deps)
+
+    expect(order).toEqual([`open ${SITE}/#receive`, 'sync']) // opened before any await (user gesture)
+    expect(tab.posted).toHaveLength(1)
+    expect(tab.posted[0].targetOrigin).toBe(SITE) // never '*'
+    const msg = tab.posted[0].message as { type: string; payload: string; bv: number }
+    expect(msg.type).toBe('gradecrunch:sync')
+    expect(msg.bv).toBe(BOOKMARKLET_VERSION)
+    expect(await decodePayload(msg.payload)).toEqual(payload)
+
+    expect(deps.navigated).toEqual([]) // no #sync URL in this tab's history
+    expect(overlay()?.textContent).toContain(`Done. Your grades are in the ${APP_NAME} tab.`)
+    expect(tab.focused).toBe(1)
+    expect(tab.closed).toBe(false)
+    expect(bus.handlers).toHaveLength(0) // stopped listening
+    expect((window as GuardedWindow).__gradeSyncRunning).toBe(false)
+    await sleep(50) // closeDelayMs is 30 in the fake deps
+    expect(overlay()).toBeNull()
+  })
+
+  test('a "ready" that arrived during the sync is remembered', async () => {
+    const bus = fakeBus()
+    const tab = new FakeTab(bus)
+    let finish: (p: SyncPayload) => void = () => {}
+    const { deps } = handoffDeps(tab, bus, () => {})
+    deps.syncGradescope = () => new Promise((resolve) => (finish = resolve))
+    const running = runSync(deps)
+    tab.sayReady() // the tab loads while we are still reading grades
+    finish(payload)
+    await running
+    expect(tab.posted).toHaveLength(1)
+    expect(deps.navigated).toEqual([])
+  })
+
+  test('popup blocked: falls back to the #sync fragment in this tab', async () => {
+    const listen = vi.fn(() => () => {})
+    const deps = fakeDeps({ siteOrigin: SITE, openReceiver: () => null, listen })
+    await runSync(deps)
+    expect(listen).not.toHaveBeenCalled()
+    expect(deps.navigated).toHaveLength(1)
+    const frag = parseSyncFragment(new URL(deps.navigated[0]).hash)
+    expect(await decodePayload(frag!.payload)).toEqual(payload)
+  })
+
+  test('the tab never says ready: closes it and falls back to the fragment', async () => {
+    const bus = fakeBus()
+    const tab = new FakeTab(bus)
+    const { deps } = handoffDeps(tab, bus, () => {})
+    await runSync(deps)
+    expect(tab.posted).toEqual([])
+    expect(tab.closed).toBe(true)
+    expect(bus.handlers).toHaveLength(0)
+    expect(deps.navigated).toHaveLength(1)
+    expect(deps.navigated[0].startsWith(`${SITE}/#sync=`)).toBe(true)
+  })
+
+  test('the tab was closed by the student: falls back without waiting', async () => {
+    const bus = fakeBus()
+    const tab = new FakeTab(bus)
+    const { deps } = handoffDeps(tab, bus, () => {})
+    deps.syncGradescope = async () => {
+      tab.closed = true
+      return payload
+    }
+    await runSync(deps)
+    expect(tab.posted).toEqual([])
+    expect(deps.navigated).toHaveLength(1)
+  })
+
+  test('messages from another origin or another window are ignored', async () => {
+    const bus = fakeBus()
+    const tab = new FakeTab(bus)
+    const other = {}
+    const { deps } = handoffDeps(tab, bus, () =>
+      setTimeout(() => {
+        tab.sayReady('https://evil.example') // right window, wrong origin
+        tab.sayReady(SITE, other) // right origin, wrong window
+      }, 0),
+    )
+    await runSync(deps)
+    expect(tab.posted).toEqual([]) // never counted as ready
+    expect(deps.navigated).toHaveLength(1) // so it fell back
+  })
+
+  test('a forged "done" from another window does not count', async () => {
+    const bus = fakeBus()
+    const tab = new FakeTab(bus, null) // the real tab never answers
+    const { deps } = handoffDeps(tab, bus)
+    const running = runSync(deps)
+    await sleep(5)
+    bus.emit({ source: {}, origin: SITE, data: { type: 'gradecrunch:done', ok: true } })
+    await running
+    expect(overlay()?.textContent).toContain('did not answer')
+  })
+
+  test('the tab reports an error: shows it, no fallback navigation', async () => {
+    const bus = fakeBus()
+    const tab = new FakeTab(bus, { ok: false, message: 'That sync data looks broken.' })
+    const { deps } = handoffDeps(tab, bus)
+    await runSync(deps)
+    expect(deps.navigated).toEqual([])
+    expect(overlay()?.textContent).toContain(`${APP_NAME}: sync failed`)
+    expect(overlay()?.textContent).toContain('That sync data looks broken.')
+    expect(overlay()!.querySelector('button')!.textContent).toBe('Close')
+    expect((window as GuardedWindow).__gradeSyncRunning).toBe(false)
+  })
+
+  test('Cancel closes the GradeCrunch tab and posts nothing', async () => {
+    const bus = fakeBus()
+    const tab = new FakeTab(bus)
+    let finish: (p: SyncPayload) => void = () => {}
+    const { deps } = handoffDeps(tab, bus)
+    deps.syncGradescope = () => new Promise((resolve) => (finish = resolve))
+    const running = runSync(deps)
+    overlay()!.querySelector('button')!.click()
+    finish(payload)
+    await running
+    expect(tab.closed).toBe(true)
+    expect(tab.posted).toEqual([])
+    expect(deps.navigated).toEqual([])
+    expect(bus.handlers).toHaveLength(0)
+  })
+
+  test('a failed sync closes the unused GradeCrunch tab', async () => {
+    const bus = fakeBus()
+    const tab = new FakeTab(bus)
+    const { deps } = handoffDeps(tab, bus)
+    deps.syncGradescope = async () => {
+      throw new Error('Log in to Gradescope first')
+    }
+    await runSync(deps)
+    expect(tab.closed).toBe(true)
+    expect(overlay()?.textContent).toContain('Log in to Gradescope first')
+  })
+})
+
+describe('double-click guard and Back navigation', () => {
+  test('the guard is cleared before navigating, and a cache restore removes the stale overlay', async () => {
+    const sync = vi.fn(async () => payload)
+    const deps = fakeDeps({ syncGradescope: sync })
+    await runSync(deps)
+    expect(deps.navigated).toHaveLength(1)
+    expect((window as GuardedWindow).__gradeSyncRunning).toBe(false)
+    expect(overlay()).not.toBeNull() // "Opening GradeCrunch..." while the new page loads
+
+    window.dispatchEvent(new Event('pageshow')) // the student pressed Back and the page came from the cache
+    expect(overlay()).toBeNull()
+
+    await runSync(deps) // clicking the bookmark again works
+    expect(sync).toHaveBeenCalledTimes(2)
+    expect(deps.navigated).toHaveLength(2)
+  })
+})
+
+// ---------------------------------------------------------------- postMessage handoff (app side)
+
+describe('isGradeSiteOrigin', () => {
+  test('accepts only https origins of the grade sites', () => {
+    expect(isGradeSiteOrigin('https://canvas.cmu.edu')).toBe(true)
+    expect(isGradeSiteOrigin('https://cmu.instructure.com')).toBe(true)
+    expect(isGradeSiteOrigin('https://www.gradescope.com')).toBe(true)
+    expect(isGradeSiteOrigin('https://autolab.andrew.cmu.edu')).toBe(true)
+    expect(isGradeSiteOrigin('http://canvas.cmu.edu')).toBe(false)
+    expect(isGradeSiteOrigin('https://canvas.cmu.edu.evil.example')).toBe(false)
+    expect(isGradeSiteOrigin('https://canvas.cmu.edu/path')).toBe(false)
+    expect(isGradeSiteOrigin('null')).toBe(false)
+    expect(isGradeSiteOrigin('')).toBe(false)
+  })
+})
+

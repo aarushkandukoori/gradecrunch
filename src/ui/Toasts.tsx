@@ -1,5 +1,6 @@
 // Little messages at the bottom of the screen ("Synced 6 courses from Gradescope"). They disappear after 5
-// seconds unless the student opens their details. Screen readers hear them through aria-live="polite".
+// seconds (8 when they have a button like Undo), and wait while the mouse is over them, while one of their
+// buttons has keyboard focus, or while their details are open. Screen readers hear them through aria-live.
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { CloseIcon } from './icons'
 
@@ -18,6 +19,7 @@ export interface Toast extends ToastOptions {
 export type PushToast = (message: string, opts?: ToastOptions) => void
 
 const AUTO_DISMISS_MS = 5000
+const AUTO_DISMISS_ACTION_MS = 8000 // longer when there is a button to press (Undo, Open Setup)
 
 export function useToasts() {
   const [toasts, setToasts] = useState<Toast[]>([])
@@ -39,13 +41,16 @@ export function useToasts() {
 function ToastView({ toast, onDismiss }: { toast: Toast; onDismiss: (id: number) => void }) {
   const [open, setOpen] = useState(false)
   const [hover, setHover] = useState(false)
+  const [focused, setFocused] = useState(false)
+  const delay = toast.action || toast.details?.length ? AUTO_DISMISS_ACTION_MS : AUTO_DISMISS_MS
 
-  // Auto-dismiss, paused while the details are open or the mouse is over it (so it can be read).
+  // Auto-dismiss, paused while the details are open, the mouse is over it, or keyboard focus is inside it
+  // (so keyboard and screen-reader users can reach the buttons). The timer starts over when the pause ends.
   useEffect(() => {
-    if (open || hover) return
-    const t = setTimeout(() => onDismiss(toast.id), AUTO_DISMISS_MS)
+    if (open || hover || focused) return
+    const t = setTimeout(() => onDismiss(toast.id), delay)
     return () => clearTimeout(t)
-  }, [open, hover, toast.id, onDismiss])
+  }, [open, hover, focused, delay, toast.id, onDismiss])
 
   return (
     <div
@@ -53,6 +58,11 @@ function ToastView({ toast, onDismiss }: { toast: Toast; onDismiss: (id: number)
       role={toast.tone === 'error' ? 'alert' : 'status'}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
+      onFocus={() => setFocused(true)}
+      onBlur={(e) => {
+        // Focus moving between two buttons of the same toast still counts as "inside".
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setFocused(false)
+      }}
     >
       <div className="toast-row">
         <span className="toast-msg">{toast.message}</span>

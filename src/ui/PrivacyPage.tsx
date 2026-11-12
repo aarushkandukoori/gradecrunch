@@ -28,9 +28,16 @@ export function PrivacyPage() {
 
       <h2>Where it goes</h2>
       <p>
-        The Sync button sends your grades back to this page in the part of the URL after the <code>#</code>. Browsers
-        never send that part to any server. This page reads it, saves it in your browser and removes it from the
-        address bar and history right away.
+        The Sync button opens {APP_NAME} in a new tab and hands your grades straight to it, tab to tab, inside your
+        browser. They are never put in a URL and never sent to a server. This page only accepts grades from the tab
+        that opened it, and only when that tab is Canvas, Gradescope or Autolab.
+      </p>
+      <p>
+        If your browser blocks the new tab (a popup blocker), the Sync button falls back to opening a link with your
+        grades in the part after the <code>#</code>. Browsers never send that part to a server, and this page removes
+        it from the address bar right away, but the link can stay in your browser history (and in history sync, if you
+        have it turned on). To clear it, delete the {APP_NAME} entries from your browser history, or allow popups
+        for Canvas, Gradescope and Autolab so it never happens.
       </p>
 
       <h2>What is stored</h2>

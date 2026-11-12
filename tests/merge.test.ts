@@ -4,7 +4,7 @@ import { beforeAll, describe, expect, test } from 'vitest'
 import { loadCatalog, lookupCourse } from '../src/lib/catalog'
 import { bestCategoryMatch, inferCategory, normalizeName } from '../src/lib/categorize'
 import { DEFAULT_SCHEME_GRAD, DEFAULT_SCHEME_UNDERGRAD } from '../src/lib/cmu'
-import { buildCourses, median, stripNumberPrefix, termSortKey, termsOf } from '../src/lib/merge'
+import { buildCourses, canonicalTerm, median, rekeyPrefs, stripNumberPrefix, termSortKey, termsOf } from '../src/lib/merge'
 import type { Course, CoursePrefs, ManualCourse, Settings, Store, SyncedCategory, SyncedCourse, SyncedItem } from '../src/types'
 
 // ---------------------------------------------------------------- builders for synthetic data
@@ -687,7 +687,8 @@ describe('buildCourses: prefs', () => {
     expect(off.categories.map((k) => k.weight)).toEqual([null, null])
     const on = only(buildCourses(store([{ ...base, weighted: false }], { prefs: { [key]: { weighted: true, weights: { 'c:100:g2': 50 } } } })))
     expect(on.weighted).toBe(true)
-    expect(on.categories.map((k) => k.weight)).toEqual([40, 50])
+    // Canvas does not use an unweighted course's stored group weights, so neither do we: only the typed one shows.
+    expect(on.categories.map((k) => k.weight)).toEqual([null, 50])
   })
 
   test('moved items, ignoring moves to missing categories', () => {
@@ -955,5 +956,199 @@ describe('alternate exam versions', () => {
   test('the student can count a skipped alternate anyway', () => {
     const c = exams([item('1', 'Midterm 1', 'm', 22.5, 25), item('2', 'Midterm 1A', 'm', null, 25)], { included: ['c:2'] })
     expect(c.items.find((i) => i.name === 'Midterm 1A')!.omit).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------- review fixes
+
+describe('terms are compared by meaning, not spelling', () => {
+  test('canonicalTerm gives one spelling per term', () => {
+    expect(canonicalTerm('fall 2026')).toBe('Fall 2026')
+    expect(canonicalTerm('F26')).toBe('Fall 2026')
+    expect(canonicalTerm('Fall  2026')).toBe('Fall 2026')
+    expect(canonicalTerm('Summer One 2026')).toBe('Summer 2026')
+    expect(canonicalTerm('N26')).toBe('Summer 2026')
+    expect(canonicalTerm('  Default   Term ')).toBe('Default Term') // unknown: kept, spaces tidied
+    expect(canonicalTerm('')).toBeNull()
+    expect(canonicalTerm(null)).toBeNull()
+  })
+
+  test('canonicalTerm keeps the same sort key', () => {
+    for (const t of ['fall 2026', 'S27', 'M26', 'Summer I 2026', '2026 Fall']) {
+      expect(termSortKey(canonicalTerm(t))).toBe(termSortKey(t))
+    }
+  })
+
+  test('Canvas "Summer One 2026" and Gradescope "summer 2026" are one class', () => {
+    const c = only(
+      buildCourses(
+        store([
+          canvas('100', { number: '15112', term: 'Summer One 2026' }),
+          gs('900', { number: '15112', term: 'summer 2026' }),
+        ]),
+      ),
+    )
+    expect(c.term).toBe('Summer 2026')
+    expect(c.key).toBe('Summer 2026|15112')
+    expect(c.sources).toHaveLength(2)
+  })
+})
+
+describe('course keys stay stable when a source joins', () => {
+  test('Canvas decides the key even though "autolab" sorts before "canvas"', () => {
+    const shell = canvas('100', { number: '18213', alsoNumbers: ['15213'] })
+    expect(only(buildCourses(store([shell]))).key).toBe('Fall 2026|18213')
+    const both = only(buildCourses(store([shell, autolab('15213-f26', { number: '15213', term: 'Fall 2026' })])))
+    expect(both.key).toBe('Fall 2026|18213')
+    expect(both.number).toBe('18213')
+  })
+
+  test('prefs saved under another number of the same class keep applying', () => {
+    const gsOnly = gs('900', { number: '10335', alsoNumbers: ['10615'] })
+    const prefs = { 'Fall 2026|10335': { units: 12 } }
+    expect(only(buildCourses(store([gsOnly], { prefs }))).key).toBe('Fall 2026|10335')
+    // Canvas joins with 10615 and would normally decide the key; the saved key wins.
+    const joined = only(buildCourses(store([canvas('100', { number: '10615' }), gsOnly], { prefs })))
+    expect(joined.key).toBe('Fall 2026|10335')
+    expect(joined.units).toBe(12)
+    // Once something is saved under the normal key, that key is used.
+    const both = only(buildCourses(store([canvas('100', { number: '10615' }), gsOnly], { prefs: { ...prefs, 'Fall 2026|10615': { units: 6 } } })))
+    expect(both.key).toBe('Fall 2026|10615')
+    expect(both.units).toBe(6)
+  })
+})
+
+describe('hand-added course that is also synced', () => {
+  const manual = (term: string): ManualCourse => ({ key: 'manual:1', number: '15-213', title: '', term, percent: 92 })
+
+  test('the synced course wins, so QPA does not count it twice', () => {
+    const courses = buildCourses(store([gs('900', { number: '15213' })], { manual: [manual('fall 2026')] }))
+    expect(courses.map((c) => c.key)).toEqual(['Fall 2026|15213'])
+  })
+
+  test('a hand-added course in another term stays', () => {
+    const courses = buildCourses(store([gs('900', { number: '15213' })], { manual: [manual('Spring 2026')] }))
+    expect(courses.map((c) => c.key).sort()).toEqual(['Fall 2026|15213', 'manual:1'])
+  })
+})
+
+describe('two Canvas shells with the same number', () => {
+  const lecture = canvas('100', {
+    weighted: true,
+    canvasScore: 84,
+    categories: [cat('h', 'Homework', 40), cat('e', 'Exams', 60)],
+    items: [item('1', 'HW 1', 'h', 90, 100), item('2', 'Midterm 1', 'e', 80, 100)],
+  })
+
+  test('an unweighted recitation shell brings no weights', () => {
+    const recitation = canvas('200', { weighted: false, categories: [cat('a', 'Assignments', 100)], items: [item('3', 'Recitation 1', 'a', 10, 10)] })
+    const c = only(buildCourses(store([lecture, recitation])))
+    expect(c.weighted).toBe(true)
+    expect(c.categories.map((k) => k.weight)).toEqual([40, 60, null])
+  })
+
+  test('two weighted shells: weights only from the one where Canvas shows a score', () => {
+    const other = canvas('050', { weighted: true, categories: [cat('a', 'Assignments', 100)], items: [item('3', 'Recitation 1', 'a', 10, 10)] })
+    const c = only(buildCourses(store([other, lecture])))
+    expect(c.categories.find((k) => k.name === 'Assignments')!.weight).toBeNull()
+    expect(c.categories.filter((k) => k.weight !== null).map((k) => k.weight)).toEqual([40, 60])
+  })
+
+  test('without a Canvas score, the shell with more scored items wins', () => {
+    const empty = canvas('050', { weighted: true, categories: [cat('a', 'Assignments', 100)], items: [item('3', 'Recitation 1', 'a', null, 10)] })
+    const c = only(buildCourses(store([empty, { ...lecture, canvasScore: null }])))
+    expect(c.categories.filter((k) => k.weight !== null).map((k) => k.weight)).toEqual([40, 60])
+  })
+})
+
+describe('Gradescope never overrides what Canvas decided', () => {
+  test('an excused Canvas item stays excused', () => {
+    const c = only(
+      buildCourses(
+        store([
+          canvas('100', { categories: [cat('q', 'Quizzes', 100)], items: [item('1', 'Quiz 1', 'q', null, 10, { status: 'excused' }), item('2', 'Quiz 2', 'q', 10, 10)] }),
+          gs('900', { items: [item('g1', 'Quiz 1', null, 2, 10)] }),
+        ]),
+      ),
+    )
+    expect(itemNamed(c, 'Quiz 1')).toMatchObject({ score: null, status: 'excused', source: 'canvas', otherScore: 2, otherSource: 'gradescope' })
+  })
+
+  test('an omitted Canvas item stays without a score', () => {
+    const c = only(
+      buildCourses(
+        store([
+          canvas('100', { categories: [cat('q', 'Quizzes', 100)], items: [item('1', 'Quiz 1', 'q', null, 10, { omit: true })] }),
+          gs('900', { items: [item('g1', 'Quiz 1', null, 7, 10)] }),
+        ]),
+      ),
+    )
+    expect(itemNamed(c, 'Quiz 1')).toMatchObject({ score: null, omit: true, otherScore: 7 })
+  })
+})
+
+describe('Gradescope and Autolab items with the same name', () => {
+  test('different max: two real deliverables, both kept', () => {
+    const c = only(
+      buildCourses(
+        store([
+          gs('900', { number: '15213', items: [item('w1', 'Lab 1', null, 18, 20)] }),
+          autolab('15213-f26', { number: '15213', term: 'Fall 2026', items: [item('lab1', 'Lab 1', null, 40, 100)] }),
+        ]),
+      ),
+    )
+    expect(c.items.map((i) => [i.key, i.score, i.max])).toEqual([
+      ['g:900:w1', 18, 20],
+      ['a:15213-f26:lab1', 40, 100],
+    ])
+  })
+
+  test('same max: still one item', () => {
+    const c = only(
+      buildCourses(
+        store([
+          gs('900', { number: '15213', items: [item('w1', 'Lab 1', null, 18, 20)] }),
+          autolab('15213-f26', { number: '15213', term: 'Fall 2026', items: [item('lab1', 'Lab 1', null, 18, 20)] }),
+        ]),
+      ),
+    )
+    expect(c.items).toHaveLength(1)
+    expect(c.items[0].aliases).toEqual(['a:15213-f26:lab1'])
+  })
+})
+
+describe('item keys survive Canvas posting a matching column', () => {
+  const gsCourse = gs('901', { items: [item('e1', 'Midterm 1', null, null, null, { status: 'ungraded' })] })
+  const canvasCourse = canvas('100', { categories: [cat('x', 'Exams', 100)], items: [item('m1', 'Midterm 1', 'x', null, 100)] })
+  const key = 'Fall 2026|21241'
+
+  test('what-ifs, ignores and moves saved under the Gradescope key move to the Canvas key', () => {
+    const saved: CoursePrefs = { whatIf: { 'g:901:e1': 85 }, ignored: ['g:901:e1'], whatIfGraded: ['g:901:e1'], included: ['g:901:e1'] }
+    expect(only(buildCourses(store([gsCourse], { prefs: { [key]: saved } }))).items[0].key).toBe('g:901:e1')
+
+    const c = only(buildCourses(store([canvasCourse, gsCourse], { prefs: { [key]: saved } })))
+    expect(c.items[0].key).toBe('c:m1')
+    expect(c.items[0].aliases).toEqual(['g:901:e1'])
+    expect(c.prefs).toEqual({ whatIf: { 'c:m1': 85 }, ignored: ['c:m1'], whatIfGraded: ['c:m1'], included: ['c:m1'] })
+  })
+
+  test('a move saved under the old key still applies', () => {
+    const c = only(
+      buildCourses(
+        store([{ ...canvasCourse, categories: [cat('x', 'Exams', 50), cat('y', 'Other', 50)] }, gsCourse], {
+          prefs: { [key]: { moved: { 'g:901:e1': 'c:100:y' } } },
+        }),
+      ),
+    )
+    expect(c.items[0].categoryKey).toBe('c:100:y')
+  })
+
+  test('rekeyPrefs: an entry under the current key wins over the old key', () => {
+    const items = [{ ...only(buildCourses(store([canvasCourse]))).items[0], aliases: ['g:901:e1'] }]
+    expect(rekeyPrefs({ whatIf: { 'g:901:e1': 50, 'c:m1': 90, other: 3 } }, items).whatIf).toEqual({ 'c:m1': 90, other: 3 })
+    expect(rekeyPrefs({ ignored: ['g:901:e1', 'c:m1'] }, items).ignored).toEqual(['c:m1'])
+    // Nothing to rename: the same object comes back.
+    const p = { units: 9 }
+    expect(rekeyPrefs(p, [])).toBe(p)
   })
 })

@@ -73,7 +73,7 @@ export function SetupSteps({ toast }: { toast: PushToast }) {
         <ExternalLink href={`${CANVAS_ORIGIN}/`} className="btn btn-secondary">
           Open Canvas <ExternalIcon size={14} />
         </ExternalLink>
-        <p>Log in like usual, click Sync grades in your bookmarks bar, and you'll land back here with your grades.</p>
+        <p>Log in like usual and click Sync grades in your bookmarks bar. Your grades open here in a new tab.</p>
       </li>
       <li className="card step">
         <span className="step-num" aria-hidden="true">

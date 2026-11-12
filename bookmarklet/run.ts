@@ -1,7 +1,11 @@
 // What the Sync bookmarklet does when clicked, split out from main.ts so tests can call it with
-// fake fetchers. Flow: figure out which site we are on -> show a small overlay -> read grades
-// same-origin with the student's own session -> navigate to our site with the data in the URL
-// fragment (#sync=...). The fragment never reaches any server, and nothing else is sent anywhere.
+// fake fetchers and fake tabs. Flow:
+//   1. right away (while the click still counts, so the popup blocker allows it) open a GradeCrunch tab
+//      at <site>/#receive and start listening for its messages
+//   2. show a small overlay and read grades same-origin with the student's own session
+//   3. hand the grades to the GradeCrunch tab with postMessage (see protocol.ts)
+//   4. fallback when the tab was blocked or never answered: navigate this tab to <site>/#sync=<data>.
+// Nothing is sent to any server: postMessage goes tab to tab, and a URL fragment never leaves the browser.
 import type { SyncPayload } from '../src/types'
 import { APP_NAME } from '../src/lib/brand'
 import { encodePayload } from '../src/lib/payload'
@@ -9,18 +13,20 @@ import { sameOriginFetcher, syncCanvas } from '../src/sync/canvas'
 import { syncGradescope } from '../src/sync/gradescope'
 import { syncAutolab } from '../src/sync/autolab'
 import { BOOKMARKLET_VERSION } from './version'
+import {
+  detectSite,
+  MSG_DONE,
+  MSG_READY,
+  MSG_SYNC,
+  RECEIVE_HASH,
+  type DoneMessage,
+  type IncomingMessage,
+  type SyncMessage,
+} from './protocol'
 
-export type Site = 'canvas' | 'gradescope' | 'autolab'
+export { detectSite, type IncomingMessage, type Site } from './protocol'
 
-export function detectSite(hostname: string): Site | null {
-  const host = hostname.toLowerCase()
-  if (host === 'canvas.cmu.edu' || host === 'cmu.instructure.com') return 'canvas'
-  if (host === 'www.gradescope.com' || host === 'gradescope.com') return 'gradescope'
-  if (host === 'autolab.andrew.cmu.edu') return 'autolab'
-  return null
-}
-
-/** The URL we send the student to: our site + payload in the fragment + bookmarklet version. */
+/** The fallback URL: our site + payload in the fragment + bookmarklet version. */
 export function syncUrl(siteOrigin: string, encoded: string): string {
   return siteOrigin + '/#sync=' + encoded + '&bv=' + BOOKMARKLET_VERSION
 }
@@ -41,6 +47,14 @@ export function autolabFetchPage(path: string): Promise<{ html: string; url: str
   })
 }
 
+/** The parts of the opened GradeCrunch tab we use. A real Window has all of these. */
+export interface ReceiverTab {
+  readonly closed: boolean
+  postMessage: (message: unknown, targetOrigin: string) => void
+  focus: () => void
+  close: () => void
+}
+
 // Everything that touches the outside world, injectable so tests can fake it.
 export interface RunDeps {
   hostname: string
@@ -48,8 +62,12 @@ export interface RunDeps {
   syncCanvas: (onProgress: (msg: string) => void) => Promise<SyncPayload>
   syncGradescope: (onProgress: (msg: string) => void) => Promise<SyncPayload>
   syncAutolab: (onProgress: (msg: string) => void) => Promise<SyncPayload>
+  openReceiver: (url: string) => ReceiverTab | null // null when the popup blocker said no
+  listen: (handler: (event: IncomingMessage) => void) => () => void // returns a function that stops listening
   navigate: (url: string) => void
   alert: (msg: string) => void
+  timeoutMs: number // how long to wait for each answer from the GradeCrunch tab
+  closeDelayMs: number // how long the "Done" overlay stays up
 }
 
 export function realDeps(siteOrigin: string): RunDeps {
@@ -59,16 +77,72 @@ export function realDeps(siteOrigin: string): RunDeps {
     syncCanvas: (p) => syncCanvas(sameOriginFetcher(), p),
     syncGradescope: (p) => syncGradescope(gradescopeFetchText, p),
     syncAutolab: (p) => syncAutolab(autolabFetchPage, p),
+    // No "noopener": the new tab needs window.opener to send us its "ready" message.
+    openReceiver: (url) => window.open(url, '_blank'),
+    listen: (handler) => {
+      const onMessage = (e: MessageEvent) => handler({ source: e.source, origin: e.origin, data: e.data })
+      window.addEventListener('message', onMessage)
+      return () => window.removeEventListener('message', onMessage)
+    },
     navigate: (url) => {
       location.href = url
     },
     alert: (msg) => window.alert(msg),
+    timeoutMs: 20000,
+    closeDelayMs: 4000,
+  }
+}
+
+/**
+ * Listen to the GradeCrunch tab. Only messages from that exact tab AND from our own site count: any other
+ * page can post messages to this window too, and must not be able to fake "ready" or "done".
+ */
+function watchReceiver(deps: RunDeps, receiver: ReceiverTab) {
+  let ready = false
+  let done: DoneMessage | null = null
+  let wake: (() => void) | null = null // set while someone is waiting for a message
+
+  const stop = deps.listen((event) => {
+    if (event.source !== receiver || event.origin !== deps.siteOrigin) return
+    const data = event.data as { type?: unknown; ok?: unknown; message?: unknown } | null
+    if (!data || typeof data !== 'object') return
+    if (data.type === MSG_READY) {
+      ready = true
+    } else if (data.type === MSG_DONE) {
+      done = { type: MSG_DONE, ok: data.ok === true, message: typeof data.message === 'string' ? data.message : undefined }
+    } else {
+      return
+    }
+    if (wake) wake()
+  })
+
+  /** Resolves true as soon as check() is true, or false after deps.timeoutMs. */
+  function waitUntil(check: () => boolean): Promise<boolean> {
+    return new Promise((resolve) => {
+      if (check()) return resolve(true)
+      const timer = setTimeout(() => {
+        wake = null
+        resolve(false)
+      }, deps.timeoutMs)
+      wake = () => {
+        if (!check()) return
+        clearTimeout(timer)
+        wake = null
+        resolve(true)
+      }
+    })
+  }
+
+  return {
+    waitForReady: () => waitUntil(() => ready),
+    waitForDone: async (): Promise<DoneMessage | null> => ((await waitUntil(() => done !== null)) ? done : null),
+    stop,
   }
 }
 
 type GuardedWindow = Window & { __gradeSyncRunning?: boolean }
 
-/** Run one sync. Resolves when it has navigated, failed (overlay shows why) or been cancelled. */
+/** Run one sync. Resolves when the grades were handed over, it failed (overlay shows why) or was cancelled. */
 export async function runSync(deps: RunDeps): Promise<void> {
   const w = window as GuardedWindow
   if (w.__gradeSyncRunning) return // clicking the bookmark twice should not start two syncs
@@ -78,10 +152,21 @@ export async function runSync(deps: RunDeps): Promise<void> {
     return
   }
 
+  // Before any await: browsers only allow window.open during the click itself.
+  const receiver = deps.openReceiver(deps.siteOrigin + '/' + RECEIVE_HASH)
+  const inbox = receiver ? watchReceiver(deps, receiver) : null
+
+  /** Stop listening and close the GradeCrunch tab if we will not use it. */
+  function dropReceiver() {
+    inbox?.stop()
+    if (receiver && !receiver.closed) receiver.close()
+  }
+
   w.__gradeSyncRunning = true
   let cancelled = false
   const overlay = createOverlay(() => {
-    cancelled = true // we cannot stop fetches already in flight, but we will not navigate
+    cancelled = true // we cannot stop fetches already in flight, but we will not hand anything over
+    dropReceiver()
     overlay.remove()
     w.__gradeSyncRunning = false
   })
@@ -90,10 +175,50 @@ export async function runSync(deps: RunDeps): Promise<void> {
     const sync = { canvas: deps.syncCanvas, gradescope: deps.syncGradescope, autolab: deps.syncAutolab }[site]
     const payload = await sync((msg) => overlay.setStatus(msg))
     if (cancelled) return
+    const encoded = await encodePayload(payload)
+    if (cancelled) return
+
+    // Main path: hand the grades to the GradeCrunch tab.
+    if (receiver && inbox && !receiver.closed) {
+      overlay.setStatus('Waiting for the ' + APP_NAME + ' tab...')
+      const ready = await inbox.waitForReady()
+      if (cancelled) return
+      if (ready && !receiver.closed) {
+        const message: SyncMessage = { type: MSG_SYNC, payload: encoded, bv: BOOKMARKLET_VERSION }
+        receiver.postMessage(message, deps.siteOrigin) // exact origin, never '*': only our site may read it
+        overlay.setStatus('Sending your grades to ' + APP_NAME + '...')
+        const done = await inbox.waitForDone()
+        if (cancelled) return
+        inbox.stop()
+        w.__gradeSyncRunning = false
+        if (!done) {
+          overlay.showError('The ' + APP_NAME + ' tab did not answer. Check that tab, or click Sync again.')
+        } else if (!done.ok) {
+          overlay.showError(done.message || APP_NAME + ' could not read the grades.')
+        } else {
+          overlay.showDone('Done. Your grades are in the ' + APP_NAME + ' tab.')
+          try {
+            receiver.focus() // browsers may ignore this; the overlay message says where to look
+          } catch {
+            // ignore
+          }
+          setTimeout(() => overlay.remove(), deps.closeDelayMs)
+        }
+        return
+      }
+    }
+
+    // Fallback: the popup was blocked or never said "ready". Navigate this tab with the data in the fragment.
+    dropReceiver()
     overlay.setStatus('Opening ' + APP_NAME + '...')
-    deps.navigate(syncUrl(deps.siteOrigin, await encodePayload(payload)))
+    // Clear the guard now: if the student comes Back to this page and the browser restores it from its cache,
+    // our code would still think a sync is running and ignore the next click.
+    w.__gradeSyncRunning = false
+    window.addEventListener('pageshow', () => overlay.remove(), { once: true }) // restored from cache: drop the stale box
+    deps.navigate(syncUrl(deps.siteOrigin, encoded))
   } catch (err) {
     if (cancelled) return
+    dropReceiver()
     overlay.showError(err instanceof Error ? err.message : String(err))
     w.__gradeSyncRunning = false
   }
@@ -104,6 +229,7 @@ export async function runSync(deps: RunDeps): Promise<void> {
 interface Overlay {
   setStatus: (msg: string) => void
   showError: (msg: string) => void
+  showDone: (msg: string) => void
   remove: () => void
 }
 
@@ -143,6 +269,12 @@ function createOverlay(onCancel: () => void): Overlay {
       title.textContent = APP_NAME + ': sync failed'
       status.textContent = msg // textContent, never innerHTML: error text can contain page data
       status.style.color = '#a11'
+      button.textContent = 'Close'
+      button.onclick = () => box.remove()
+    },
+    showDone: (msg) => {
+      title.textContent = APP_NAME + ': synced'
+      status.textContent = msg
       button.textContent = 'Close'
       button.onclick = () => box.remove()
     },

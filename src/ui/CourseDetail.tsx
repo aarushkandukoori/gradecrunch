@@ -1,14 +1,16 @@
 // The expanded part of a course card: "What you need", the categories table (edit weights), every assignment
 // (what-ifs, move, ignore, planned items) and the course settings (units, final letter, pass/fail, cutoffs, hide).
 import { useState, type FormEvent } from 'react'
-import { dropRuleText, formatPercent, formatPoints } from '../lib/format'
+import { courseLabel, dropRuleText, formatPercent, formatPoints } from '../lib/format'
+import { isCountable } from '../lib/grade'
 import { randomId, withCutoff, withPlanned, withWeight } from '../lib/store'
-import type { Course, CoursePrefs, GradeResult, Level, NeededResult } from '../types'
+import { whatIfApplies, withoutWhatIfs } from '../lib/whatIfs'
+import type { Course, CoursePrefs, GradeCut, GradeResult, Level, NeededResult } from '../types'
 import { ItemRow } from './ItemRow'
 import { LetterChip } from './LetterChip'
 import { NumberField } from './NumberField'
 import { PlusIcon, TrashIcon } from './icons'
-import { groupItems, isZeroPointPlaceholder, neededText, placeholderOnlyCategories } from './view'
+import { collapseScheme, groupItems, isZeroPointPlaceholder, neededText, placeholderOnlyCategories } from './view'
 
 interface Props {
   course: Course
@@ -24,7 +26,12 @@ export function CourseDetail({ course, grade, needed, level, onPrefs, onRemove }
   const results = new Map(grade.categories.map((c) => [c.key, c]))
   const dropped = new Set(grade.categories.flatMap((c) => c.dropped))
   const ignored = new Set(prefs.ignored ?? [])
+  // Any saved what-if, even one that no longer applies (its item got a real score), so it can still be cleared.
   const hasWhatIf = Object.keys(prefs.whatIf ?? {}).length > 0
+  // Remaining items with no point values yet. When other remaining work has points, "what you need" is computed
+  // from that part only, so say so.
+  const unknownMax = course.items.filter((i) => i.score === null && i.max === null && isCountable(i, ignored)).length
+  const someKnown = needed.some((n) => n.status !== 'unknown' && n.status !== 'locked')
   const hasCanvas = course.sources.some((s) => s.source === 'canvas')
   const included = new Set(prefs.included ?? [])
   // Zero-point placeholders (lecture notes, attendance) are hidden until the student asks to see them.
@@ -60,6 +67,11 @@ export function CourseDetail({ course, grade, needed, level, onPrefs, onRemove }
               ))}
             </tbody>
           </table>
+          {unknownMax > 0 && someKnown && (
+            <p className="muted small">
+              Leaves out {unknownMax === 1 ? '1 item' : `${unknownMax} items`} whose point values aren't posted yet.
+            </p>
+          )}
         </section>
       )}
 
@@ -76,7 +88,12 @@ export function CourseDetail({ course, grade, needed, level, onPrefs, onRemove }
               Use category weights
             </label>
             {prefs.weights && (
-              <button type="button" className="link-btn" onClick={() => onPrefs((p) => ({ ...p, weights: undefined }))}>
+              <button
+                type="button"
+                className="link-btn"
+                // Typing a weight also turned weighting on, so undo both: back to exactly what the site uses.
+                onClick={() => onPrefs((p) => ({ ...p, weights: undefined, weighted: undefined }))}
+              >
                 Reset to {hasCanvas ? 'Canvas' : 'original'} weights
               </button>
             )}
@@ -137,7 +154,7 @@ export function CourseDetail({ course, grade, needed, level, onPrefs, onRemove }
               </button>
             )}
             {hasWhatIf && (
-              <button type="button" className="link-btn" onClick={() => onPrefs((p) => ({ ...p, whatIf: undefined }))}>
+              <button type="button" className="link-btn" onClick={() => onPrefs(withoutWhatIfs)}>
                 Clear what-ifs
               </button>
             )}
@@ -158,7 +175,7 @@ export function CourseDetail({ course, grade, needed, level, onPrefs, onRemove }
                       key={item.key}
                       item={item}
                       categories={course.categories}
-                      whatIf={prefs.whatIf?.[item.key]}
+                      whatIf={whatIfApplies(item, prefs) ? prefs.whatIf?.[item.key] : undefined}
                       ignored={ignored.has(item.key)}
                       included={included.has(item.key)}
                       dropped={dropped.has(item.key)}
@@ -242,8 +259,31 @@ const SCHEME_HINT: Record<Course['schemeSource'], string> = {
 function CourseSettings({ course, level, onPrefs, onRemove }: Pick<Props, 'course' | 'level' | 'onPrefs' | 'onRemove'>) {
   const prefs = course.prefs
   const letters = [...(level === 'grad' ? GRAD_LETTERS : UNDERGRAD_LETTERS), ...OTHER_LETTERS]
+  // A letter set in grad mode (e.g. "B-") is still in effect after switching to undergrad. Keep it in the list
+  // so the box shows it (instead of "Auto") and the student can see and clear it.
+  if (prefs.letter && !letters.includes(prefs.letter)) letters.unshift(prefs.letter)
+  // Undergrads edit the cuts letters are really computed with: one per letter (A from 90, B from 80...), since
+  // an A- in Canvas counts as an A. Grad students edit every +/- cut.
+  const cuts = collapseScheme(course.scheme, level)
   // The lowest cut (R at 0) is not editable: everything below D is R.
-  const editableCuts = course.scheme.filter((c) => c.min > 0)
+  const editableCuts = cuts.filter((c) => c.min > 0)
+
+  function changeCut(index: number, min: number) {
+    const cut = editableCuts[index]
+    // Keep the order: a letter can't need more than the one above it, or less than the one below.
+    const above = editableCuts[index - 1]?.min ?? 100
+    const below = editableCuts[index + 1]?.min ?? 0
+    if (min > above || min < below) return
+    // Undergrad: save plain A/B/C/D cuts (starting from the collapsed list, so no +/- cut overrides them).
+    const base: GradeCut[] = level === 'grad' ? course.scheme : cuts
+    onPrefs((p) => withCutoff(level === 'grad' ? p : { ...p, cutoffs: undefined }, base, cut.letter, min))
+  }
+
+  function remove() {
+    if (!onRemove) return
+    const name = courseLabel(course) || 'this class'
+    if (window.confirm(`Remove ${name}? Its units, letter and other settings are deleted too.`)) onRemove()
+  }
 
   return (
     <section className="detail-section course-settings">
@@ -297,16 +337,17 @@ function CourseSettings({ course, level, onPrefs, onRemove }: Pick<Props, 'cours
             Letter cutoffs <span className="muted small">({SCHEME_HINT[course.schemeSource]})</span>
           </summary>
           <div className="cutoff-grid">
-            {editableCuts.map((c) => (
+            {editableCuts.map((c, i) => (
               <NumberField
                 key={c.letter}
                 label={`${c.letter} from`}
                 suffix="%"
-                min={0}
-                max={100}
+                // The box refuses numbers that would put this letter above the one before it or below the next.
+                min={editableCuts[i + 1]?.min ?? 0}
+                max={editableCuts[i - 1]?.min ?? 100}
                 value={c.min}
                 required
-                onCommit={(v) => onPrefs((p) => withCutoff(p, course.scheme, c.letter, v ?? c.min))}
+                onCommit={(v) => changeCut(i, v ?? c.min)}
               />
             ))}
           </div>
@@ -319,7 +360,7 @@ function CourseSettings({ course, level, onPrefs, onRemove }: Pick<Props, 'cours
       )}
 
       {onRemove && (
-        <button type="button" className="btn btn-danger-ghost btn-sm" onClick={onRemove}>
+        <button type="button" className="btn btn-danger-ghost btn-sm" onClick={remove}>
           <TrashIcon size={14} /> Remove this class
         </button>
       )}

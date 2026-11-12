@@ -1,14 +1,20 @@
 // View logic for the dashboard, kept out of the components so it can be unit tested: which courses show for a
 // term, what one-line insight a card shows, which warnings it shows, how assignments are grouped.
 import type { Course, GradeCut, GradeResult, Item, Level, NeededResult } from '../types'
+import { stripPlusMinus } from '../lib/cmu'
 import { article, formatPercent } from '../lib/format'
+import { isCountable, plannedCategories } from '../lib/grade'
+import { termsOf } from '../lib/merge'
 
 /** An empty result, for courses the grade math has not seen (should not happen, but never crash on it). */
 export const EMPTY_GRADE: GradeResult = { percent: null, letter: null, categories: [], graded: 0, remaining: 0 }
 
-/** "A-" -> "A", "B+" -> "B". CMU undergrad final grades have no plus or minus, and F is called R. */
+/**
+ * "A-" -> "A", "B+" -> "B". CMU undergrad final grades have no plus or minus, and F is called R.
+ * stripPlusMinus also handles the Unicode minus some Canvas schemes use ("A−").
+ */
 function family(letter: string): string {
-  const base = letter.trim().toUpperCase().replace(/[+-]$/, '')
+  const base = stripPlusMinus(letter)
   return base === 'F' ? 'R' : base
 }
 
@@ -49,10 +55,26 @@ export function neededFor(course: Course, compute: (c: Course) => NeededResult[]
   return collapseNeeded(compute(course), level)
 }
 
-/** The saved term if it still exists, else the newest term (terms come newest first), else null. */
-export function pickTerm(terms: string[], saved: string | null): string | null {
-  if (saved && terms.includes(saved)) return saved
-  return terms[0] ?? null
+/** Terms that have at least one academic course with a graded item. */
+export function termsWithGrades(courses: Course[], grades: Map<string, GradeResult>): Set<string> {
+  const out = new Set<string>()
+  for (const c of courses) {
+    if (c.academic && c.term && (grades.get(c.key)?.graded ?? 0) > 0) out.add(c.term)
+  }
+  return out
+}
+
+/**
+ * Which term the dashboard shows. `terms` come newest first.
+ *  1. The term the student picked, if it still exists.
+ *  2. Else the newest term with graded work (`gradedTerms`). Next semester's courses often show up on Canvas or
+ *     Gradescope in November, before this semester's grades are final; we don't want to jump to an empty term.
+ *  3. Else the newest term, else null.
+ */
+export function pickTerm(terms: string[], chosen: string | null, gradedTerms?: Set<string>): string | null {
+  if (chosen && terms.includes(chosen)) return chosen
+  const newestGraded = gradedTerms ? terms.find((t) => gradedTerms.has(t)) : undefined
+  return newestGraded ?? terms[0] ?? null
 }
 
 /** A course only typed in by hand (no Canvas or Gradescope data). */
@@ -65,15 +87,18 @@ export function isManualOnly(c: Course): boolean {
  * other = what "Show N hidden courses" reveals: hidden courses of this term, non-academic Canvas shells, and
  *         synced courses with no term (Canvas "Default Term").
  * Courses from other terms are in neither list; switch the term to see them.
- * Hand-added courses with no term show in every term (the student did not pick one).
+ * Hand-added courses with no term (added on the welcome page, before any sync) belong to the newest term only,
+ * since that is the semester the student is in. Counting them in every term would add them to past QPAs.
  */
 export function splitCourses(courses: Course[], term: string | null): { main: Course[]; other: Course[] } {
+  const newest = termsOf(courses)[0] ?? null
   const main: Course[] = []
   const other: Course[] = []
   for (const c of courses) {
-    const inTerm = c.term === term || (c.term === null && isManualOnly(c))
+    const manualNoTerm = c.term === null && isManualOnly(c)
+    const inTerm = c.term === term || (manualNoTerm && term === newest)
     if (inTerm && c.academic && !c.prefs.hidden) main.push(c)
-    else if (inTerm || c.term === null) other.push(c)
+    else if (inTerm || (c.term === null && !manualNoTerm)) other.push(c)
   }
   return { main, other }
 }
@@ -94,7 +119,9 @@ function atLeast(percent: number | null, min: number): boolean {
  */
 export function courseInsight(needed: NeededResult[], grade: GradeResult | undefined): string | null {
   if (needed.length === 0) return null
+  // 'locked' means nothing is left to grade (whether or not the letter was reached).
   if (needed.every((n) => n.status === 'locked')) return 'Every grade is in'
+  if (needed.every((n) => n.status === 'unknown')) return "Point values for the rest aren't posted yet"
   const best = needed.find((n) => n.status !== 'impossible')
   if (!best) return `Even 100% on the rest stays below ${needed[needed.length - 1].letter}`
   if (best.status === 'guaranteed') return `${best.letter} is locked in`
@@ -116,7 +143,27 @@ export function neededText(n: NeededResult, percent: number | null): string {
       return n.needed != null ? `Need ${n.needed.toFixed(1)}% avg on remaining work` : 'Possible'
     case 'impossible':
       return 'Out of reach'
+    case 'unknown':
+      return "Point values aren't posted yet"
   }
+}
+
+/**
+ * The "to go" half of a card's meta line, e.g. "14 graded · 3 to go" or "14 graded · Final Exam to go".
+ * Counts remaining items that are worth points (or whose points are unknown), plus empty weighted categories
+ * the "what you need" math plans for (e.g. a 30% final not posted yet), so the two never disagree.
+ */
+export function toGoText(course: Course, grade: GradeResult): string {
+  // Categories that already have an item counted in grade.remaining are covered by that item.
+  const ignored = new Set(course.prefs.ignored ?? [])
+  const hasRemainingItem = (key: string) =>
+    course.items.some(
+      (i) => i.categoryKey === key && i.score === null && isCountable(i, ignored) && (i.max === null || i.max > 0),
+    )
+  const empty = plannedCategories(course).filter((c) => !hasRemainingItem(c.key))
+  const graded = `${grade.graded} graded`
+  if (grade.remaining === 0 && empty.length === 1) return `${graded} · ${empty[0].name} to go`
+  return `${graded} · ${grade.remaining + empty.length} to go`
 }
 
 /** Sum of every category weight (null counts as 0). */

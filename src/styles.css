@@ -753,6 +753,11 @@ code {
   }
 }
 
+/* Only shown on phones (see the 640px block), where .sync-status doesn't fit in the top bar. */
+.sync-status-mobile {
+  display: none;
+}
+
 /* ------------------------------------------------------------------ welcome / setup */
 
 .welcome {
@@ -1190,6 +1195,18 @@ code {
   border: 1px solid var(--border);
 }
 
+/* The grade on this card includes what-if scores. Dashed border, like the what-if boxes themselves. */
+.badge-whatif {
+  background: var(--warn-bg);
+  border: 1px dashed var(--warn-border);
+  color: var(--warn-text);
+}
+
+.note-whatif {
+  font-size: 13px;
+  color: var(--warn-text);
+}
+
 .course-summary {
   padding: 12px 20px 18px;
   display: flex;
@@ -1415,7 +1432,8 @@ code {
   font-weight: 560;
 }
 
-.needed-impossible td:last-child {
+.needed-impossible td:last-child,
+.needed-unknown td:last-child {
   color: var(--text-3);
 }
 
@@ -1581,6 +1599,44 @@ code {
   color: var(--text-2);
   cursor: pointer;
   max-width: 88px;
+}
+
+/* The "More" menu: a small list of action buttons under the button. */
+.row-menu-wrap {
+  position: relative;
+}
+
+.row-menu-list {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 20;
+  min-width: 200px;
+  max-width: min(280px, calc(100vw - 32px));
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-pop);
+  animation: pop-in var(--ease);
+}
+
+.row-menu-list button {
+  padding: 8px 10px;
+  border: 0;
+  background: transparent;
+  border-radius: 6px;
+  text-align: left;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.row-menu-list button:hover,
+.row-menu-list button:focus-visible {
+  outline: none;
+  background: var(--surface-3);
 }
 
 .add-planned {
@@ -2025,6 +2081,13 @@ code {
 
   .sync-status {
     display: none;
+  }
+
+  .sync-status-mobile {
+    display: block;
+    padding-bottom: 8px;
+    font-size: 12px;
+    color: var(--text-3);
   }
 
   /* Keep the top bar on one line on phones: the Sync button shows only its icon (the label stays for screen

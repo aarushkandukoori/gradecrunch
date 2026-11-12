@@ -1,8 +1,11 @@
+# No Cross-Origin-Opener-Policy header on purpose. The Sync button opens this site in a new tab and passes the
+# grades with postMessage, which needs that tab's window.opener link back to Canvas / Gradescope / Autolab.
+# "Cross-Origin-Opener-Policy: same-origin" would cut that link, and every sync would fall back to the #sync=
+# URL, which can stay in browser history. The app only accepts messages from its opener on those exact origins.
 /*
   Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
   Referrer-Policy: no-referrer
   X-Content-Type-Options: nosniff
   Permissions-Policy: camera=(), microphone=(), geolocation=()
-  Cross-Origin-Opener-Policy: same-origin
 /assets/*
   Cache-Control: public, max-age=31536000, immutable

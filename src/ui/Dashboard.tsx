@@ -1,6 +1,7 @@
 // The home page once there are grades: QPA card, the course grid for the chosen term, hidden courses, and the
 // "add a class by hand" form.
-import { plural } from '../lib/format'
+import { courseLabel, plural } from '../lib/format'
+import { activeWhatIfs } from '../lib/whatIfs'
 import type { Course, CoursePrefs, GradeResult, ManualCourse, NeededResult, QpaResult, Settings } from '../types'
 import { CourseCard } from './CourseCard'
 import { ManualCourseForm } from './ManualCourseForm'
@@ -9,6 +10,7 @@ import { EMPTY_GRADE } from './view'
 
 interface Props {
   term: string | null
+  newestTerm: boolean // the selected term is the newest one (cumulative QPA is shown only then)
   main: Course[]
   other: Course[]
   grades: Map<string, GradeResult>
@@ -27,6 +29,12 @@ interface Props {
 }
 
 export function Dashboard(p: Props) {
+  // Courses whose what-if scores change the QPA. A pass/fail course or one with a final letter set by hand
+  // doesn't use its percent for the QPA, so its what-ifs don't matter there.
+  const whatIfCourses = p.main
+    .filter((c) => !c.prefs.passFail && !c.prefs.letter && activeWhatIfs(c).length > 0)
+    .map(courseLabel)
+
   function card(c: Course) {
     return (
       <CourseCard
@@ -65,6 +73,8 @@ export function Dashboard(p: Props) {
         onSettings={p.onSettings}
         onAskClaude={p.onAskClaude}
         onOpenSettings={p.onOpenSettings}
+        whatIfCourses={whatIfCourses}
+        newestTerm={p.newestTerm}
       />
 
       <section aria-label="Courses">
@@ -88,7 +98,8 @@ export function Dashboard(p: Props) {
           {p.settings.showAll && (
             <>
               <p className="muted small">
-                Hidden classes and Canvas pages without a course number. They never count toward your QPA.
+                Classes you hid, Canvas pages without a course number, and classes Canvas lists with no term (its
+                "Default Term"). They don't count toward your QPA.
               </p>
               <div className="course-grid">{p.other.map(card)}</div>
             </>

@@ -1,5 +1,6 @@
 // Finds CMU course numbers ("21-241", "15122", "10-335/615") inside messy text like Canvas course codes,
 // nicknames ("1. 21241") or Gradescope short names ("21259-1"). Returns them without the dash.
+// Also reads term names ("Fall 2026", "F26") so every site's spelling of a term compares equal.
 
 // Two digits, optional dash, three digits, not glued to more digits on either side (so years like "2026" and
 // runs like "120261" never match). The last group grabs slash shorthand: "10-335/615" means 10-335 and 10-615.
@@ -33,4 +34,41 @@ export function parseCourseNumbers(...texts: (string | null | undefined)[]): { n
     }
   }
   return { number: all[0] ?? null, also: all.slice(1) }
+}
+
+// ---------------------------------------------------------------- term names
+// Sites write the same term differently ("Fall 2026", "fall 2026", "F26", "Summer One 2026"). These helpers
+// live here (no imports) so the payload validator and the store can use them without pulling in the merge code.
+
+const SEASONS: Record<string, number> = { spring: 1, summer: 2, fall: 3, s: 1, m: 2, n: 2, f: 3 }
+const SEASON_NAMES = ['', 'Spring', 'Summer', 'Fall'] // index = season number above
+
+/**
+ * Sortable number for a term: year * 10 + season (Spring 1, Summer 2, Fall 3).
+ * "Fall 2026" -> 20263, "S27" -> 20271, "M26"/"N26" (CMU summer codes) -> 20262. Unknown or null -> -1.
+ */
+export function termSortKey(term: string | null | undefined): number {
+  if (typeof term !== 'string') return -1
+  const t = term.trim().toLowerCase()
+  const long = t.match(/\b(spring|summer|fall)\b\D*(\d{4})\b/) // "Fall 2026", "Summer I 2026"
+  if (long) return Number(long[2]) * 10 + SEASONS[long[1]]
+  const reversed = t.match(/\b(\d{4})\D*\b(spring|summer|fall)\b/) // "2026 Fall"
+  if (reversed) return Number(reversed[1]) * 10 + SEASONS[reversed[2]]
+  const short = t.match(/^([smnf])(\d{2})$/) // "F26"
+  if (short) return (2000 + Number(short[2])) * 10 + SEASONS[short[1]]
+  return -1
+}
+
+/**
+ * One spelling per term, so the same class synced from two sites lands in one group:
+ * "fall 2026", "F26", "Fall  2026" -> "Fall 2026"; "Summer One 2026", "M26" -> "Summer 2026".
+ * A term we cannot read is kept as typed (spaces tidied); empty or missing -> null.
+ * Built on termSortKey, so two terms with the same sort key always get the same name.
+ */
+export function canonicalTerm(term: string | null | undefined): string | null {
+  if (typeof term !== 'string') return null
+  const key = termSortKey(term)
+  if (key > 0) return `${SEASON_NAMES[key % 10]} ${Math.floor(key / 10)}`
+  const tidy = term.trim().replace(/\s+/g, ' ')
+  return tidy || null
 }

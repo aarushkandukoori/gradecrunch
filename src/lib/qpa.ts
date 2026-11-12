@@ -2,13 +2,14 @@
 // QPA = sum(quality points x units) / sum(factorable units). Letters with no quality points
 // (P, N, W, ...) and pass/fail courses are left out entirely (research section C).
 import type { Course, GradeResult, QpaResult, QpaRow, Settings } from '../types'
-import { collegeByKey, formatCourseNumber, letterPoints, normalizeLetter, stripPlusMinus } from './cmu'
+import { collegeByKey, formatCourseNumber, letterPoints, toCmuLetter } from './cmu'
 import { letterFor } from './grade'
 
 /**
  * The letter we expect for a course, best source first:
  * the student's override, then our computed grade, then Canvas's own score, then a typed-in percent.
  * Undergrads get no +/- on final grades, so "A-" becomes "A". F becomes R (CMU's failing grade).
+ * Grad students keep +/-, but a D- (not on CMU's grad scale) becomes D.
  */
 export function estimatedLetter(course: Course, grade: GradeResult | undefined, settings: Settings): string | null {
   const letter =
@@ -18,9 +19,7 @@ export function estimatedLetter(course: Course, grade: GradeResult | undefined, 
     letterFor(course.manualPercent, course.scheme) ||
     null
   if (letter === null) return null
-  let clean = settings.level === 'undergrad' ? stripPlusMinus(letter) : normalizeLetter(letter)
-  if (clean === 'F') clean = 'R'
-  return clean
+  return toCmuLetter(letter, settings.level)
 }
 
 /** Dietrich (and IS, which follows Dietrich) leaves PE (69-xxx) and StuCo (98-xxx) out of the QPA. */
@@ -53,8 +52,20 @@ function buildRow(course: Course, grade: GradeResult | undefined, settings: Sett
   }
 }
 
+export interface QpaOptions {
+  // Compute "cumulative after this semester"? Only right for the newest term: an older term is already part of
+  // the cumulative QPA the student copied from SIO, so adding it again would count it twice. Default true.
+  includeCumulative?: boolean
+}
+
 /** Semester QPA over the given courses (the caller picks the term), plus cumulative and Dean's List. */
-export function computeQpa(courses: Course[], grades: Map<string, GradeResult>, settings: Settings): QpaResult {
+export function computeQpa(
+  courses: Course[],
+  grades: Map<string, GradeResult>,
+  settings: Settings,
+  opts: QpaOptions = {},
+): QpaResult {
+  const includeCumulative = opts.includeCumulative ?? true
   const rows = courses
     .filter(c => c.academic && !c.prefs.hidden)
     .map(c => buildRow(c, grades.get(c.key), settings))
@@ -74,7 +85,7 @@ export function computeQpa(courses: Course[], grades: Map<string, GradeResult>, 
   // Cumulative = (old quality points + this semester's) / (old units + this semester's).
   const { priorQpa, priorUnits } = settings
   const cumulativeQpa =
-    priorQpa !== null && priorUnits !== null && priorUnits > 0
+    includeCumulative && priorQpa !== null && priorUnits !== null && priorUnits > 0
       ? (priorQpa * priorUnits + qualityPoints) / (priorUnits + factorableUnits)
       : null
 
@@ -90,12 +101,14 @@ export function computeQpa(courses: Course[], grades: Map<string, GradeResult>, 
 }
 
 /**
- * Dean's List for the student's college, or null when no college is picked or the college's list can't be
- * computed (CFA, Heinz). Compares the unrounded semester QPA: CMU doesn't publish how it rounds.
+ * Dean's List for the student's college, or null when no college is picked, the college's list can't be
+ * computed (CFA, Heinz), or the student is a grad student (Dean's List is an undergraduate honor, and grad
+ * QPAs are on the 4.33 scale, so the thresholds don't apply). Compares the unrounded semester QPA: CMU doesn't publish how it rounds.
  * When a college has two ways to qualify (Dietrich, CMU-Q), we report the rule that is met, else the rule
  * the student's units fit, so the shown threshold is the one that matters.
  */
 function deansListCheck(qpa: number | null, units: number, settings: Settings): QpaResult['deansList'] {
+  if (settings.level === 'grad') return null
   const college = collegeByKey(settings.college)
   if (!college || !college.deansList) return null
   const main = college.deansList

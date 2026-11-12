@@ -27,7 +27,11 @@ import type {
 import { lookupCourse } from './catalog'
 import { bestCategoryMatch, inferCategory, normalizeName } from './categorize'
 import { DEFAULT_SCHEME_GRAD, DEFAULT_SCHEME_UNDERGRAD } from './cmu'
-import { parseCourseNumbers } from './courseNumber'
+import { canonicalTerm, parseCourseNumbers, termSortKey } from './courseNumber'
+
+// termSortKey lives in courseNumber.ts (so the payload validator can use it without this file); re-exported
+// here because the UI and tests have always imported it from merge.
+export { canonicalTerm, termSortKey }
 
 const DEFAULT_UNITS = 9 // most CMU courses are 9 units; the UI asks the student to check SIO
 const STATUSES: ItemStatus[] = ['graded', 'submitted', 'ungraded', 'missing', 'unsubmitted', 'excused']
@@ -72,24 +76,6 @@ function numbersOf(c: SyncedCourse): string[] {
 
 // ---------------------------------------------------------------- terms
 
-const SEASONS: Record<string, number> = { spring: 1, summer: 2, fall: 3, s: 1, m: 2, n: 2, f: 3 }
-
-/**
- * Sortable number for a term: year * 10 + season (Spring 1, Summer 2, Fall 3).
- * "Fall 2026" -> 20263, "S27" -> 20271, "M26"/"N26" (CMU summer codes) -> 20262. Unknown or null -> -1.
- */
-export function termSortKey(term: string | null): number {
-  if (typeof term !== 'string') return -1
-  const t = term.trim().toLowerCase()
-  const long = t.match(/\b(spring|summer|fall)\b\D*(\d{4})\b/) // "Fall 2026", "Summer I 2026"
-  if (long) return Number(long[2]) * 10 + SEASONS[long[1]]
-  const reversed = t.match(/\b(\d{4})\D*\b(spring|summer|fall)\b/) // "2026 Fall"
-  if (reversed) return Number(reversed[1]) * 10 + SEASONS[reversed[2]]
-  const short = t.match(/^([smnf])(\d{2})$/) // "F26"
-  if (short) return (2000 + Number(short[2])) * 10 + SEASONS[short[1]]
-  return -1
-}
-
 /** Distinct terms of academic courses, newest first (null terms left out). */
 export function termsOf(courses: Course[]): string[] {
   const terms: string[] = []
@@ -105,8 +91,12 @@ interface Group {
   key: string
   number: string | null
   term: string | null
-  members: SyncedCourse[] // Canvas members first
+  members: SyncedCourse[] // Canvas members first, then Gradescope, then Autolab
 }
+
+// Which source decides a group's key and number, and wins ties: Canvas, then Gradescope, then Autolab.
+// (Sorting by the source name would put "autolab" before "canvas".)
+const SOURCE_RANK: Record<string, number> = { canvas: 0, gradescope: 1, autolab: 2 }
 
 /** Clean up a synced course read from storage (fill missing fields, re-parse numbers if needed). */
 function sanitizeSynced(raw: SyncedCourse): SyncedCourse | null {
@@ -127,7 +117,8 @@ function sanitizeSynced(raw: SyncedCourse): SyncedCourse | null {
     number,
     alsoNumbers,
     title: str(raw.title).trim(),
-    term: str(raw.term).trim() || null,
+    // One spelling per term ("F26" and "fall 2026" -> "Fall 2026"), so grouping and keys agree across sites.
+    term: canonicalTerm(str(raw.term)),
     url: str(raw.url),
     weighted: raw.weighted === true,
     categories: list(raw.categories).filter((c) => c && typeof c === 'object' && (str(c.id) || typeof c.id === 'number')),
@@ -148,7 +139,7 @@ function groupSynced(synced: Store['synced']): Group[] {
     .map(sanitizeSynced)
     .filter((c): c is SyncedCourse => c !== null)
     // Canvas first so it decides keys and wins ties; then by id so the result never depends on storage order.
-    .sort((a, b) => a.source.localeCompare(b.source) || a.sourceId.localeCompare(b.sourceId))
+    .sort((a, b) => SOURCE_RANK[a.source] - SOURCE_RANK[b.source] || a.sourceId.localeCompare(b.sourceId))
 
   const groups: Group[] = []
   for (const c of courses) {
@@ -200,8 +191,12 @@ function makeItem(si: SyncedItem, key: string, categoryKey: string, source: Item
   }
 }
 
-/** Step 2: Canvas assignment groups become categories, Canvas assignments become items. */
-function addCanvas(course: SyncedCourse, categories: Category[], items: Item[]): void {
+/**
+ * Step 2: Canvas assignment groups become categories, Canvas assignments become items.
+ * `useWeights` is false for every shell except the one weighted shell the group takes weights from: two shells
+ * each bring weights that add to 100, so keeping both would let the grade go above 100%.
+ */
+function addCanvas(course: SyncedCourse, categories: Category[], items: Item[], useWeights: boolean): void {
   const catKey = (groupId: string) => `c:${course.sourceId}:${groupId}`
   for (const sc of course.categories) {
     const key = catKey(String(sc.id))
@@ -209,7 +204,7 @@ function addCanvas(course: SyncedCourse, categories: Category[], items: Item[]):
     categories.push({
       key,
       name: str(sc.name).trim() || 'Untitled group',
-      weight: num(sc.weight),
+      weight: useWeights ? num(sc.weight) : null,
       dropLowest: Math.max(0, Math.floor(num(sc.dropLowest) ?? 0)),
       dropHighest: Math.max(0, Math.floor(num(sc.dropHighest) ?? 0)),
       neverDrop: list(sc.neverDrop).map((id) => `c:${id}`),
@@ -229,11 +224,17 @@ function sameMax(a: number | null, b: number | null): boolean {
   return a !== null && b !== null && Math.abs(a - b) <= 0.001
 }
 
+/** Canvas items keep their "c:" key even after a Gradescope score fills them in (their `source` changes). */
+function fromCanvas(item: Item): boolean {
+  return item.key.startsWith('c:')
+}
+
 /**
  * Find the existing item a Gradescope item is the same assignment as: equal normalized name, preferring an equal
- * max, then an unknown max, then a different max (instructors often rescale Gradescope scores on Canvas, e.g. a
- * 60 point exam shown out of 100; counting it twice would wreck the grade). `taken` holds items already matched
- * by another item of the same Gradescope course.
+ * max, then an unknown max, then a Canvas item with a different max (instructors often rescale Gradescope scores
+ * on Canvas, e.g. a 60 point exam shown out of 100; counting it twice would wreck the grade). A different max is
+ * NOT a match between Gradescope and Autolab: "Lab 1" written on Gradescope (20 pts) and "Lab 1" code on Autolab
+ * (100 pts) are two real deliverables. `taken` holds items already matched by another item of the same course.
  */
 function findMatch(gs: SyncedItem, items: Item[], taken: Set<string>): Item | null {
   const name = normalizeName(str(gs.name))
@@ -243,7 +244,7 @@ function findMatch(gs: SyncedItem, items: Item[], taken: Set<string>): Item | nu
   return (
     candidates.find((i) => sameMax(i.max, gsMax)) ??
     candidates.find((i) => i.max === null || gsMax === null) ??
-    candidates[0] ??
+    candidates.find(fromCanvas) ??
     null
   )
 }
@@ -283,10 +284,10 @@ function addGradescope(course: SyncedCourse, categories: Category[], items: Item
   for (const si of course.items) {
     const gsScore = num(si.score)
     const gsMax = num(si.max)
+    const key = `${prefix}:${course.sourceId}:${si.id}` // this item's own key when nothing matches
     const target = findMatch(si, items, taken)
 
     if (!target) {
-      const key = `${prefix}:${course.sourceId}:${si.id}`
       if (items.some((i) => i.key === key)) continue
       const categoryKey = source === 'autolab' ? placeAutolabItem(course, si, categories) : placeItem(categories, str(si.name))
       items.push(makeItem(si, key, categoryKey, source))
@@ -295,8 +296,16 @@ function addGradescope(course: SyncedCourse, categories: Category[], items: Item
     }
 
     taken.add(target.key)
+    // Remember our own key: prefs saved under it (before Canvas posted this column) must still find the item.
+    if (!list(target.aliases).includes(key)) target.aliases = [...list(target.aliases), key]
     if (target.max === null && gsMax !== null) target.max = gsMax // learn the max if we did not know it
-    if (target.score === null && gsScore !== null) {
+    if (target.status === 'excused' || target.omit) {
+      // Canvas excused it or leaves it out of the grade: that decision wins. Only show the other site's score.
+      if (gsScore !== null) {
+        target.otherScore = scaledScore(gsScore, gsMax, target)
+        target.otherSource = source
+      }
+    } else if (target.score === null && gsScore !== null) {
       // Canvas has nothing yet (often Gradescope scores reach Canvas late): use Gradescope's.
       target.score = scaledScore(gsScore, gsMax, target)
       target.status = 'graded'
@@ -399,8 +408,39 @@ function catalogUnits(numbers: string[]): number | null {
 
 /** Read prefs defensively: anything malformed is treated as "not set". */
 function prefsFor(store: Store, key: string): CoursePrefs {
-  const p = store.prefs?.[key]
+  const p = store.prefs && Object.hasOwn(store.prefs, key) ? store.prefs[key] : null
   return p && typeof p === 'object' ? p : {}
+}
+
+/**
+ * Prefs with item keys rewritten to each item's current key. An item that first came from Gradescope had the key
+ * "g:<course>:<id>"; once Canvas posts the same column the item becomes "c:<id>" and keeps the old key in
+ * `aliases`. A what-if, move or ignore saved under the old key is moved to the new one. When both keys have an
+ * entry, the one under the current key wins (it is the newer edit). The UI and grade math only see current keys.
+ */
+export function rekeyPrefs(prefs: CoursePrefs, items: Item[]): CoursePrefs {
+  const current = new Map<string, string>() // old key -> current item key
+  for (const i of items) for (const a of list(i.aliases)) current.set(a, i.key)
+  if (current.size === 0) return prefs
+
+  function rekeyMap<T>(map: Record<string, T>): Record<string, T> {
+    const out: Record<string, T> = {}
+    // Old-key entries first, so an entry saved under the current key overwrites them.
+    for (const [k, v] of Object.entries(map)) if (current.has(k)) out[current.get(k) as string] = v
+    for (const [k, v] of Object.entries(map)) if (!current.has(k)) out[k] = v
+    return out
+  }
+  function rekeyList(keys: string[]): string[] {
+    return [...new Set(keys.map((k) => current.get(k) ?? k))]
+  }
+
+  const out: CoursePrefs = { ...prefs }
+  if (prefs.whatIf && typeof prefs.whatIf === 'object') out.whatIf = rekeyMap(prefs.whatIf)
+  if (prefs.moved && typeof prefs.moved === 'object') out.moved = rekeyMap(prefs.moved)
+  if (Array.isArray(prefs.whatIfGraded)) out.whatIfGraded = rekeyList(prefs.whatIfGraded)
+  if (Array.isArray(prefs.ignored)) out.ignored = rekeyList(prefs.ignored)
+  if (Array.isArray(prefs.included)) out.included = rekeyList(prefs.included)
+  return out
 }
 
 /** Everything a course needs before prefs are applied. */
@@ -422,7 +462,8 @@ interface Draft {
 }
 
 /** Step 7: the student's fixes win over synced data. */
-function applyPrefs(d: Draft, prefs: CoursePrefs, store: Store): Course {
+function applyPrefs(d: Draft, savedPrefs: CoursePrefs, store: Store): Course {
+  const prefs = rekeyPrefs(savedPrefs, d.items)
   const weighted = typeof prefs.weighted === 'boolean' ? prefs.weighted : d.weighted
   const weights = prefs.weights && typeof prefs.weights === 'object' ? prefs.weights : {}
 
@@ -518,6 +559,30 @@ function applyPrefs(d: Draft, prefs: CoursePrefs, store: Store): Course {
   }
 }
 
+/** How many items of a synced course have a score. */
+function scoredCount(c: SyncedCourse): number {
+  return c.items.filter((i) => num(i.score) !== null).length
+}
+
+/**
+ * The one Canvas shell a group takes category weights from: a weighted shell, preferring one where Canvas shows
+ * its own score (the real lecture shell), then the one with the most scored items. Null when no shell is weighted.
+ */
+function weightShell(canvas: SyncedCourse[]): SyncedCourse | null {
+  let best: SyncedCourse | null = null
+  for (const c of canvas) {
+    if (!c.weighted) continue // an unweighted shell's stored group weights are not used by Canvas either
+    if (best === null) {
+      best = c
+      continue
+    }
+    const hasScore = c.canvasScore !== null
+    const bestHasScore = best.canvasScore !== null
+    if (hasScore !== bestHasScore ? hasScore : scoredCount(c) > scoredCount(best)) best = c
+  }
+  return best
+}
+
 /** Steps 2-5 and 8 for one group of synced courses. */
 function draftFromGroup(g: Group): Draft {
   const categories: Category[] = []
@@ -526,7 +591,8 @@ function draftFromGroup(g: Group): Draft {
   const gradescope = g.members.filter((m) => m.source === 'gradescope')
   const autolab = g.members.filter((m) => m.source === 'autolab')
 
-  for (const c of canvas) addCanvas(c, categories, items)
+  const weightsFrom = weightShell(canvas)
+  for (const c of canvas) addCanvas(c, categories, items, c === weightsFrom)
   for (const c of gradescope) addGradescope(c, categories, items)
   for (const c of autolab) addGradescope(c, categories, items)
 
@@ -547,7 +613,7 @@ function draftFromGroup(g: Group): Draft {
     term: g.term,
     academic: g.number !== null,
     sources: g.members.map((m) => ({ source: m.source, sourceId: m.sourceId, url: m.url, syncedAt: m.syncedAt })),
-    weighted: canvas.some((c) => c.weighted),
+    weighted: weightsFrom !== null,
     categories,
     items,
     canvasScore: scored ? scored.canvasScore : null,
@@ -569,7 +635,7 @@ function draftFromManual(m: ManualCourse): Draft | null {
     number,
     alsoNumbers: parsed.also,
     title,
-    term: str(m.term).trim() || null,
+    term: canonicalTerm(str(m.term)),
     // The student added it on purpose, so it is a real class even if they left the number blank.
     academic: true,
     sources: [{ source: 'manual', sourceId: m.key, url: '', syncedAt: '' }],
@@ -585,12 +651,52 @@ function draftFromManual(m: ManualCourse): Draft | null {
 
 // ---------------------------------------------------------------- main entry
 
+/** Every course number a draft claims (main + cross-listings). */
+function draftNumbers(d: Draft): string[] {
+  return d.number ? [d.number, ...d.alsoNumbers] : []
+}
+
+/** Two drafts are the same class: same term and at least one shared course number. */
+function sameClass(a: Draft, b: Draft): boolean {
+  const mine = draftNumbers(a)
+  return a.term === b.term && draftNumbers(b).some((n) => mine.includes(n))
+}
+
+function hasSavedPrefs(store: Store, key: string): boolean {
+  return !!store?.prefs && Object.hasOwn(store.prefs, key) && typeof store.prefs[key] === 'object'
+}
+
+/**
+ * A group's key is "<term>|<number>", and the number can change when a new source joins (e.g. Canvas 18213
+ * cross-listed as 15213). If nothing is saved under the new key but prefs exist under "<term>|<n>" for another
+ * number n of the same class, keep using that older key so the student's weights, what-ifs and units stay.
+ */
+function keepSavedKeys(drafts: Draft[], store: Store): void {
+  const used = new Set(drafts.map((d) => d.key)) // never give two courses the same key
+  for (const d of drafts) {
+    if (d.number === null || hasSavedPrefs(store, d.key)) continue
+    for (const n of d.alsoNumbers) {
+      const alt = `${d.term ?? ''}|${n}`
+      if (!used.has(alt) && hasSavedPrefs(store, alt)) {
+        used.add(alt)
+        d.key = alt
+        break
+      }
+    }
+  }
+}
+
 /** Synced data + manual courses + prefs -> one Course per class, academic first, then by course number. */
 export function buildCourses(store: Store): Course[] {
   const drafts: Draft[] = groupSynced(store?.synced ?? {}).map(draftFromGroup)
+  keepSavedKeys(drafts, store)
+  const syncedDrafts = [...drafts]
   for (const m of list(store?.manual)) {
     const d = draftFromManual(m)
-    if (d && !drafts.some((x) => x.key === d.key)) drafts.push(d)
+    if (!d || drafts.some((x) => x.key === d.key)) continue
+    // Same class already synced (same term, a shared number): the synced one wins, or QPA counts it twice.
+    if (syncedDrafts.some((x) => sameClass(x, d))) continue
+    drafts.push(d)
   }
 
   const courses = drafts.map((d) => applyPrefs(d, prefsFor(store, d.key), store))

@@ -1,5 +1,5 @@
 // The big QPA card at the top of the dashboard: estimated semester QPA, one line per course, cumulative QPA,
-// Dean's List check and the "Ask Claude" button.
+// Dean's List check and the "Ask Claude" button. It says so when any course's grade includes what-if scores.
 import { useState } from 'react'
 import { COLLEGES } from '../lib/cmu'
 import { formatQpa, plural } from '../lib/format'
@@ -14,9 +14,11 @@ interface Props {
   onSettings: (patch: Partial<Settings>) => void
   onAskClaude: () => void
   onOpenSettings: () => void
+  whatIfCourses: string[] // labels ("21-241") of courses whose grade includes what-if scores
+  newestTerm: boolean // cumulative QPA only makes sense for the newest term (the prior QPA already has older ones)
 }
 
-export function QpaCard({ qpa, settings, onSettings, onAskClaude, onOpenSettings }: Props) {
+export function QpaCard({ qpa, settings, onSettings, onAskClaude, onOpenSettings, whatIfCourses, newestTerm }: Props) {
   const priorSet = settings.priorQpa != null && settings.priorUnits != null && settings.priorUnits > 0
   const [editing, setEditing] = useState(false)
   const college = COLLEGES.find((c) => c.key === settings.college)
@@ -33,6 +35,12 @@ export function QpaCard({ qpa, settings, onSettings, onAskClaude, onOpenSettings
             ? `from ${plural(qpa.factorableUnits, 'factorable unit')}`
             : 'Add grades or pick final letters to see it'}
         </p>
+        {whatIfCourses.length > 0 && (
+          <p className="note-whatif">
+            Includes what-if scores in {whatIfCourses.join(', ')}. Clear them on {whatIfCourses.length === 1 ? 'that card' : 'those cards'}{' '}
+            to see your real QPA.
+          </p>
+        )}
         <button type="button" className="btn btn-secondary btn-sm claude-btn" onClick={onAskClaude}>
           <SparkleIcon /> Ask Claude about my grades
         </button>
@@ -53,7 +61,11 @@ export function QpaCard({ qpa, settings, onSettings, onAskClaude, onOpenSettings
       <div className="qpa-side">
         <div className="qpa-block">
           <h3 className="eyebrow">Cumulative</h3>
-          {priorSet && qpa.cumulativeQpa != null && !editing ? (
+          {!newestTerm ? (
+            <p className="muted small">
+              Shown for your newest term only. Your SIO cumulative QPA already includes this one.
+            </p>
+          ) : priorSet && qpa.cumulativeQpa != null && !editing ? (
             <p>
               Cumulative after this semester: <strong className="num">{formatQpa(qpa.cumulativeQpa)}</strong>{' '}
               <button type="button" className="link-btn" onClick={() => setEditing(true)}>

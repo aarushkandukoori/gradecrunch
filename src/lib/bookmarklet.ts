@@ -1,9 +1,19 @@
-// Helpers the app uses around the Sync bookmarklet: building the draggable javascript: link and
-// reading the #sync=... fragment the bookmarklet sends the student back with.
+// Helpers the app uses around the Sync bookmarklet: building the draggable javascript: link and reading the
+// #sync=... fragment (the fallback when a popup blocker stops the postMessage handoff in src/ui/receive.ts).
 import { BOOKMARKLET_CODE } from '../generated/bookmarklet'
 
-// Defined next to the bookmarklet source so the bundle and the app always agree on it.
+// Defined next to the bookmarklet source so the bundle and the app always agree on them.
 export { BOOKMARKLET_VERSION } from '../../bookmarklet/version'
+export {
+  isGradeSiteOrigin,
+  MSG_DONE,
+  MSG_READY,
+  MSG_SYNC,
+  RECEIVE_HASH,
+  type DoneMessage,
+  type IncomingMessage,
+  type SyncMessage,
+} from '../../bookmarklet/protocol'
 
 /** The javascript: URL the student drags to their bookmarks bar. */
 export function bookmarkletHref(siteOrigin: string): string {

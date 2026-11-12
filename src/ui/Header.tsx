@@ -83,6 +83,7 @@ export function Header(p: Props) {
               </button>
               {popoverOpen && (
                 <div className="popover" role="dialog" aria-label="How to sync">
+                  <p className="muted small">Last synced: {syncLine}</p>
                   <p>
                     Click <strong>Sync grades</strong> in your bookmarks bar while you're on Canvas, Gradescope or
                     Autolab.
@@ -129,6 +130,11 @@ export function Header(p: Props) {
           </button>
         </div>
       </div>
+      {p.showDashboard && (
+        // Phones have no room for the status in the top bar, so it gets its own small line under it. Without it
+        // a phone user couldn't tell that Gradescope was never synced or that the grades are days old.
+        <p className="container sync-status-mobile">{syncLine}</p>
+      )}
     </header>
   )
 }

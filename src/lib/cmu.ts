@@ -195,17 +195,38 @@ export function stripPlusMinus(letter: string): string {
 }
 
 /**
+ * Graduate letters CMU doesn't give, mapped to the nearest CMU grade. Canvas schemes sometimes have a D-
+ * (CMU's grad scale stops at D) or call the failing grade F (CMU says R).
+ */
+const GRAD_NEAREST: Record<string, string> = { 'D-': 'D', F: 'R' }
+
+/**
+ * The CMU final-grade version of a letter from a Canvas scheme or an override:
+ *  - Undergrad: +/- is stripped ("A-" -> "A"), and F becomes R.
+ *  - Grad: +/- is kept, D- becomes D, F becomes R.
+ * Anything else (P, W, unknown letters) is returned cleaned up but otherwise unchanged.
+ */
+export function toCmuLetter(letter: string, level: Level): string {
+  const clean = normalizeLetter(letter)
+  if (level === 'undergrad') {
+    const base = stripPlusMinus(clean)
+    return base === 'F' ? 'R' : base
+  }
+  return GRAD_NEAREST[clean] ?? clean
+}
+
+/**
  * Quality points per unit for a letter, or null if the letter does not factor into QPA
  * (P, N, W, ...) or is not a CMU letter at all.
  *  - Undergrad: +/- is stripped ("A-" and "A+" count as A = 4.0, "B+" as B = 3.0). An undergrad's
  *    +/- grade in a graduate course is converted the same way (research section A).
  *  - F is treated as R (Canvas schemes say F; CMU's failing grade is R). Both are 0.
+ *  - Grad: a D- (not on CMU's grad scale) counts as D.
  */
 export function letterPoints(letter: string, level: Level): number | null {
-  let l = normalizeLetter(letter)
-  if (l === '' || NON_FACTORABLE.includes(l)) return null
-  if (level === 'undergrad') l = stripPlusMinus(l)
-  if (l === 'F') l = 'R'
+  const raw = normalizeLetter(letter)
+  if (raw === '' || NON_FACTORABLE.includes(raw)) return null
+  const l = toCmuLetter(raw, level)
   const table = level === 'grad' ? GRAD_POINTS : UNDERGRAD_POINTS
   return Object.hasOwn(table, l) ? table[l] : null
 }

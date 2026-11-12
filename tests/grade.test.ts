@@ -9,6 +9,7 @@ import {
   keepBestBruteForce,
   letterFor,
   neededForLetters,
+  plannedCategories,
   roundPercent,
   type Entry,
 } from '../src/lib/grade'
@@ -339,16 +340,38 @@ describe('drop rules', () => {
 // ---------------------------------------------------------------- what-if and fill
 
 describe('what-if and fillRemaining', () => {
-  it('what-if replaces a real score and fills an unscored item', () => {
+  it('what-if replaces a real score (when typed over it) and fills an unscored item', () => {
     const graded = item('hw', 5, 10, { key: 'g' })
     const todo = item('hw', null, 10, { key: 't' })
-    const c = course([cat('hw', 100)], [graded, todo])
+    const c = course([cat('hw', 100)], [graded, todo], {}, { whatIfGraded: ['g'] })
     expect(gradeCourse(c).percent).toBeCloseTo(50, 10)
     expect(gradeCourse(c, { whatIf: { g: 10 } }).percent).toBeCloseTo(100, 10)
     const g = gradeCourse(c, { whatIf: { t: 10 } })
     expect(g.percent).toBeCloseTo(75, 10)
     expect(g.graded).toBe(2)
     expect(g.remaining).toBe(0)
+  })
+
+  it('a what-if set before the grade came out stops applying once the real score is in', () => {
+    // The student typed 95 on Midterm 2 while it was ungraded; the real score (70) has since synced.
+    const c = course([cat('ex', 100)], [item('ex', 70, 100, { key: 'mt2' })])
+    expect(gradeCourse(c, { whatIf: { mt2: 95 } }).percent).toBeCloseTo(70, 10)
+    // Typed over the real score on purpose (listed in whatIfGraded): it applies.
+    const typedOver = course([cat('ex', 100)], [item('ex', 70, 100, { key: 'mt2' })], {}, { whatIfGraded: ['mt2'] })
+    expect(gradeCourse(typedOver, { whatIf: { mt2: 95 } }).percent).toBeCloseTo(95, 10)
+  })
+
+  it("ignores a what-if on an item whose max is unknown (it would be pure extra credit)", () => {
+    // Points mode: HW 70/100 x2 + a midterm with no posted max. A what-if of 85 must not push the grade to 112.5%.
+    const items = [item('all', 70, 100), item('all', 70, 100), item('all', null, null, { key: 'mt' })]
+    const p = course([cat('all', null)], items, { weighted: false })
+    const g = gradeCourse(p, { whatIf: { mt: 85 } })
+    expect(g.percent).toBeCloseTo(70, 10)
+    expect(g.graded).toBe(2)
+    expect(g.remaining).toBe(1) // still work to go
+    // Weighted 50/50 with the unknown-max exam alone in its group: still 70, not 107.5.
+    const w = course([cat('hw', 50), cat('ex', 50)], [item('hw', 70, 100), item('ex', null, null, { key: 'mt' })])
+    expect(gradeCourse(w, { whatIf: { mt: 85 } }).percent).toBeCloseTo(70, 10)
   })
 
   it('fillRemaining gives every remaining item fill * max, including planned items', () => {
@@ -382,6 +405,33 @@ describe('what-if and fillRemaining', () => {
     expect(gradeCourse(c, { fillRemaining: 0 }).percent).toBeCloseTo(80, 10)
     const p = course([cat('hw', 50), cat('final', 50)], [item('hw', 8, 10)], { weighted: false })
     expect(gradeCourse(p, { fillRemaining: 0 }).percent).toBeCloseTo(80, 10)
+  })
+})
+
+describe('plannedCategories (empty weighted categories planned for)', () => {
+  it('skips categories named like extra credit or bonus', () => {
+    const c = course(
+      [cat('hw', 50), cat('final', 45), { ...cat('ec', 5), name: 'Extra Credit' }, { ...cat('b', 3), name: 'Bonus points' }],
+      [item('hw', 9, 10)],
+    )
+    expect(plannedCategories(c).map(x => x.key)).toEqual(['final'])
+  })
+
+  it('only adds categories while the total weight stays at or under 100, biggest first', () => {
+    // hw 50 has points. Empty: final 30, project 20, participation 10. 50 + 30 + 20 = 100; participation would make 110.
+    const c = course([cat('hw', 50), cat('part', 10), cat('final', 30), cat('proj', 20)], [item('hw', 9, 10)])
+    expect(plannedCategories(c).map(x => x.key)).toEqual(['final', 'proj'])
+    // Weights already reach 100 with posted work: an extra empty 5% is bonus, not planned.
+    const full = course([cat('hw', 50), cat('ex', 50), cat('quiz', 5)], [item('hw', 9, 10), item('ex', null, 100)])
+    expect(plannedCategories(full)).toEqual([])
+  })
+
+  it('none in points mode, for 0-weight categories, or for categories with posted work', () => {
+    expect(plannedCategories(course([cat('hw', 50), cat('final', 50)], [item('hw', 9, 10)], { weighted: false }))).toEqual([])
+    expect(plannedCategories(course([cat('hw', 100), cat('zero', 0)], [item('hw', 9, 10)]))).toEqual([])
+    // A category whose only item has an unknown max still has nothing worth points: it is planned for.
+    const c = course([cat('hw', 50), cat('ex', 50)], [item('hw', 9, 10), item('ex', null, null)])
+    expect(plannedCategories(c).map(x => x.key)).toEqual(['ex'])
   })
 })
 
@@ -461,12 +511,40 @@ describe('neededForLetters', () => {
     expect(b).toEqual({ letter: 'B', min: 80, needed: 80, status: 'possible' })
   })
 
-  it('locked (have it) or impossible (do not) when no work remains', () => {
-    const c = course([cat('all', null)], [item('all', 85, 100), item('all', null, null)], { weighted: false })
+  it("every letter is 'locked' when no work remains (even ones below the grade; the UI checks the percent)", () => {
+    const c = course([cat('all', null)], [item('all', 85, 100), item('all', null, 0)], { weighted: false })
     const needed = neededForLetters(c)
-    expect(needed[0]).toEqual({ letter: 'A', min: 90, needed: null, status: 'impossible' })
-    expect(needed[1]).toEqual({ letter: 'B', min: 80, needed: null, status: 'locked' })
-    expect(needed[3].status).toBe('locked')
+    expect(needed[0]).toEqual({ letter: 'A', min: 90, needed: null, status: 'locked' })
+    expect(needed.every(n => n.status === 'locked' && n.needed === null)).toBe(true)
+    // Fully graded below every cut: still 'locked', never "even 100% on the rest" (there is no rest).
+    const low = course([cat('all', null)], [item('all', 55, 100)], { weighted: false })
+    expect(neededForLetters(low).map(n => n.status)).toEqual(['locked', 'locked', 'locked', 'locked'])
+  })
+
+  it("'unknown' when the only work left has no known point value (never 'locked')", () => {
+    // HW 95/100 graded, an exam with no posted max: we can't say anything is locked in.
+    const c = course([cat('all', null)], [item('all', 95, 100), item('all', null, null)], { weighted: false })
+    const needed = neededForLetters(c)
+    expect(needed).toHaveLength(4)
+    expect(needed.every(n => n.status === 'unknown' && n.needed === null)).toBe(true)
+  })
+
+  it('known and unknown remaining work together: computed from the known part', () => {
+    // 10 x 9.5/10 graded, one 10-pt HW left, plus an exam with no max. Math uses the HW only.
+    const items = [...Array.from({ length: 10 }, () => item('all', 9.5, 10)), item('all', null, 10), item('all', null, null)]
+    const needed = neededForLetters(course([cat('all', null)], items, { weighted: false }))
+    // Same as 95/100 graded + 10 left: A needs (95 + 10x)/110 >= 90 -> 40%; at 0% it's 86.4%, so B is guaranteed.
+    expect(needed[0]).toEqual({ letter: 'A', min: 90, needed: 40, status: 'possible' })
+    expect(needed[1]).toEqual({ letter: 'B', min: 80, needed: 0, status: 'guaranteed' })
+  })
+
+  it('no rows when no grade can be computed and nothing can be planned', () => {
+    // Only ungraded items with unknown max.
+    expect(neededForLetters(course([cat('all', null)], [item('all', null, null)], { weighted: false }))).toEqual([])
+    // Only zero-point items.
+    expect(neededForLetters(course([cat('all', null)], [item('all', null, 0)], { weighted: false }))).toEqual([])
+    // Weighted course whose only work sits in a 0% group: even 100% gives no grade.
+    expect(neededForLetters(course([cat('w0', 0)], [item('w0', 8, 10), item('w0', null, 10)]))).toEqual([])
   })
 
   it('what-ifs count as scores, not remaining work', () => {
@@ -475,8 +553,38 @@ describe('neededForLetters', () => {
     })
     const needed = neededForLetters(c, { t: 50 })
     // (70 + 50) / 150 = 80% with nothing left
-    expect(needed[0].status).toBe('impossible')
-    expect(needed[1].status).toBe('locked')
+    expect(needed.map(n => n.status)).toEqual(['locked', 'locked', 'locked', 'locked'])
+  })
+
+  it('an empty Extra Credit group is not treated as work you must earn', () => {
+    // HW 90/100 (w 50) graded, exam 100 pts (w 50) ungraded, EC (w 5) empty. A needs 90% on the exam,
+    // not the 81.9% you'd get by assuming the bonus is earned.
+    const c = course(
+      [cat('hw', 50), cat('ex', 50), { ...cat('ec', 5), name: 'Extra Credit' }],
+      [item('hw', 90, 100), item('ex', null, 100)],
+    )
+    expect(neededForLetters(c)[0]).toEqual({ letter: 'A', min: 90, needed: 90, status: 'possible' })
+  })
+
+  it('caps the number of letters at 15', () => {
+    const scheme = Array.from({ length: 30 }, (_, k) => ({ letter: `L${k}`, min: 99 - k * 3.3 }))
+    const c = course([cat('all', null)], [item('all', 50, 100), item('all', null, 100)], { weighted: false, scheme })
+    const needed = neededForLetters(c)
+    expect(needed).toHaveLength(15)
+    expect(needed[0].letter).toBe('L0') // the highest letters are kept
+  })
+
+  it('stays fast on a big course with heavy drop rules (400 items, drop 150 lowest / 40 highest, 30 cuts)', () => {
+    const items = Array.from({ length: 400 }, (_, j) =>
+      item('all', j % 2 ? (j * 7) % 10 : null, (j % 13) + 1, { key: `big${j}` }),
+    )
+    const scheme = Array.from({ length: 30 }, (_, k) => ({ letter: `L${k}`, min: 99 - k * 3.3 }))
+    const c = course([cat('all', null, { dropLowest: 150, dropHighest: 40 })], items, { weighted: false, scheme })
+    const start = performance.now()
+    const needed = neededForLetters(c)
+    const ms = performance.now() - start
+    expect(needed).toHaveLength(15)
+    expect(ms).toBeLessThan(1000) // about 130 ms on a laptop; it was about 1.8 s before the caps
   })
 
   it('uses the course scheme, skipping its lowest letter', () => {

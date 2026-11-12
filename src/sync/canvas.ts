@@ -282,6 +282,9 @@ export async function syncCanvas(fetchPage: PageFetcher, onProgress?: (msg: stri
   const progress = onProgress ?? (() => {})
   const at = new Date().toISOString()
   const warnings: string[] = []
+  // Courses whose assignments could not be read. They stay in `courses` (the course-list numbers are still
+  // good), but the app keeps its previously stored assignments for them instead of wiping them with [].
+  const failedIds: string[] = []
 
   progress('Canvas: reading your course list')
   const rawCourses = (await fetchAll(fetchPage, COURSES_PATH)) as RawCourse[]
@@ -302,6 +305,7 @@ export async function syncCanvas(fetchPage: PageFetcher, onProgress?: (msg: stri
     } catch (err) {
       if (err instanceof CanvasAuthError) throw err // logged out mid-sync: the whole sync is invalid
       warnings.push(`${course.title}: could not read assignments (${reason(err)})`)
+      failedIds.push(course.sourceId)
     }
 
     if (raw.grading_standard_id != null) {
@@ -322,5 +326,5 @@ export async function syncCanvas(fetchPage: PageFetcher, onProgress?: (msg: stri
     return course
   })
 
-  return { v: 1, kind: 'canvas', at, courses, warnings }
+  return { v: 1, kind: 'canvas', at, courses, warnings, failedIds }
 }

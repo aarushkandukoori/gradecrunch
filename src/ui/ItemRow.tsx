@@ -1,6 +1,6 @@
 // One assignment inside an expanded course: name, status, score, due date, a "what if" score box, and a small
 // menu to move it to another category or leave it out of the grade.
-import { useState } from 'react'
+import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react'
 import { formatDue, formatPoints, formatScore, scorePercent, statusLabel } from '../lib/format'
 import { withIgnored, withIncluded, withMoved, withoutPlanned, withWhatIf } from '../lib/store'
 import type { Category, CoursePrefs, Item } from '../types'
@@ -10,7 +10,7 @@ import { EditIcon, ExternalIcon } from './icons'
 interface Props {
   item: Item
   categories: Category[]
-  whatIf: number | undefined
+  whatIf: number | undefined // only a what-if the grade math actually uses (see whatIfApplies)
   ignored: boolean
   included: boolean // the student chose to count an item we had skipped automatically
   dropped: boolean
@@ -21,19 +21,51 @@ const SOURCE_TAG: Record<Item['source'], string> = { canvas: 'Canvas', gradescop
 
 export function ItemRow({ item, categories, whatIf, ignored, included, dropped, onPrefs }: Props) {
   const [editing, setEditing] = useState(false)
+  const pencilRef = useRef<HTMLButtonElement>(null)
+  const refocusPencil = useRef(false) // after the what-if box closes, put focus back on the pencil
   const countable = !item.omit && item.status !== 'excused' && !ignored
   const remaining = item.score === null
+  // With unknown points possible a what-if can't be turned into a percent (it would count as pure extra credit),
+  // so those items get no what-if box until the site posts the points.
+  const canWhatIf = countable && item.max !== null
   // Remaining work always gets a what-if box; graded work gets one after clicking the edit button.
-  const showWhatIf = countable && (remaining || editing || whatIf !== undefined)
+  const showWhatIf = canWhatIf && (remaining || editing || whatIf !== undefined)
   const statusKey = item.planned ? 'planned' : item.status
 
-  function onMenu(value: string) {
-    if (value.startsWith('move:')) onPrefs((p) => withMoved(p, item.key, value.slice(5)))
-    else if (value === 'ignore') onPrefs((p) => withIgnored(p, item.key, !ignored))
-    else if (value === 'remove') onPrefs((p) => withoutPlanned(p, item.key))
-    else if (value === 'include') onPrefs((p) => withIncluded(p, item.key, true))
-    else if (value === 'uninclude') onPrefs((p) => withIncluded(p, item.key, false))
+  // When the what-if box closes, the pencil button comes back. If focus was lost with the box (Escape or Enter),
+  // give it to the pencil so keyboard users keep their place; if the student moved on to something else, leave it.
+  useEffect(() => {
+    if (showWhatIf || !refocusPencil.current) return
+    refocusPencil.current = false
+    const lost = document.activeElement === null || document.activeElement === document.body
+    if (lost) pencilRef.current?.focus()
+  }, [showWhatIf])
+
+  function closeWhatIf() {
+    if (!remaining) refocusPencil.current = true // only graded items have a pencil to go back to
+    setEditing(false)
   }
+
+  // The "More" menu: moving to another category, ignoring, and so on.
+  const actions: MenuAction[] = []
+  if (categories.length > 1) {
+    for (const c of categories) {
+      if (c.key === item.categoryKey) continue
+      actions.push({ label: `Move to ${c.name}`, run: () => onPrefs((p) => withMoved(p, item.key, c.key)) })
+    }
+  }
+  if (item.skipReason) {
+    actions.push({ label: 'Count it anyway', run: () => onPrefs((p) => withIncluded(p, item.key, true)) })
+  } else {
+    actions.push({
+      label: ignored ? 'Include again' : 'Ignore in grade',
+      run: () => onPrefs((p) => withIgnored(p, item.key, !ignored)),
+    })
+  }
+  if (included) {
+    actions.push({ label: 'Skip it again (alternate version)', run: () => onPrefs((p) => withIncluded(p, item.key, false)) })
+  }
+  if (item.planned) actions.push({ label: 'Remove planned item', run: () => onPrefs((p) => withoutPlanned(p, item.key)) })
 
   return (
     <li className={`item ${countable ? '' : 'is-muted'}`}>
@@ -87,17 +119,21 @@ export function ItemRow({ item, categories, whatIf, ignored, included, dropped, 
             hideLabel
             placeholder="what if"
             className="whatif"
-            suffix={item.max !== null ? `/ ${formatPoints(item.max)}` : 'pts'}
+            suffix={`/ ${formatPoints(item.max)}`}
             min={0}
             value={whatIf}
+            autoFocus={editing && whatIf === undefined}
             onCommit={(v) => {
-              onPrefs((p) => withWhatIf(p, item.key, v))
-              if (v === null) setEditing(false)
+              // Typed over a real score: remember that, so the what-if keeps applying after the next sync.
+              onPrefs((p) => withWhatIf(p, item.key, v, item.score !== null))
+              if (v === null) closeWhatIf()
             }}
+            onCancel={!remaining && whatIf === undefined ? closeWhatIf : undefined}
           />
         )}
-        {countable && !remaining && !showWhatIf && (
+        {canWhatIf && !remaining && !showWhatIf && (
           <button
+            ref={pencilRef}
             type="button"
             className="btn-icon btn-icon-sm"
             onClick={() => setEditing(true)}
@@ -107,35 +143,105 @@ export function ItemRow({ item, categories, whatIf, ignored, included, dropped, 
             <EditIcon size={14} />
           </button>
         )}
-        <select
-          className="row-menu"
-          aria-label={`More actions for ${item.name}`}
-          value=""
-          onChange={(e) => onMenu(e.target.value)}
-        >
-          <option value="" disabled>
-            More
-          </option>
-          {categories.length > 1 && (
-            <optgroup label="Move to category">
-              {categories
-                .filter((c) => c.key !== item.categoryKey)
-                .map((c) => (
-                  <option key={c.key} value={`move:${c.key}`}>
-                    {c.name}
-                  </option>
-                ))}
-            </optgroup>
-          )}
-          {item.skipReason ? (
-            <option value="include">Count it anyway</option>
-          ) : (
-            <option value="ignore">{ignored ? 'Include again' : 'Ignore in grade'}</option>
-          )}
-          {included && <option value="uninclude">Skip it again (alternate version)</option>}
-          {item.planned && <option value="remove">Remove planned item</option>}
-        </select>
+        <RowMenu label={`More actions for ${item.name}`} actions={actions} />
       </div>
     </li>
+  )
+}
+
+interface MenuAction {
+  label: string
+  run: () => void
+}
+
+/**
+ * A "More" button that opens a small list of actions. A real button + menu (not a <select>), because a select
+ * fires its change event when a keyboard user presses an arrow key on it, which would run an action by accident.
+ * Keyboard: Enter / Space / Down opens it and focuses the first action, Up / Down move, Escape closes.
+ */
+function RowMenu({ label, actions }: { label: string; actions: MenuAction[] }) {
+  const [open, setOpen] = useState(false)
+  const menuId = useId()
+  const wrapRef = useRef<HTMLDivElement>(null)
+  const buttonRef = useRef<HTMLButtonElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+
+  // On open: focus the first action, and close on a click anywhere outside.
+  useEffect(() => {
+    if (!open) return
+    menuRef.current?.querySelector<HTMLButtonElement>('button')?.focus()
+    const onClick = (e: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onClick)
+    return () => document.removeEventListener('mousedown', onClick)
+  }, [open])
+
+  function close() {
+    setOpen(false)
+    buttonRef.current?.focus()
+  }
+
+  function onMenuKey(e: KeyboardEvent<HTMLDivElement>) {
+    const buttons = [...(menuRef.current?.querySelectorAll<HTMLButtonElement>('button') ?? [])]
+    const at = buttons.indexOf(document.activeElement as HTMLButtonElement)
+    let next = -1
+    if (e.key === 'ArrowDown') next = (at + 1) % buttons.length
+    else if (e.key === 'ArrowUp') next = (at - 1 + buttons.length) % buttons.length
+    else if (e.key === 'Home') next = 0
+    else if (e.key === 'End') next = buttons.length - 1
+    else if (e.key === 'Escape') {
+      e.preventDefault()
+      close()
+      return
+    } else if (e.key === 'Tab') {
+      setOpen(false) // let Tab move on as usual
+      return
+    }
+    if (next >= 0) {
+      e.preventDefault()
+      buttons[next]?.focus()
+    }
+  }
+
+  return (
+    <div className="row-menu-wrap" ref={wrapRef}>
+      <button
+        ref={buttonRef}
+        type="button"
+        className="row-menu"
+        aria-label={label}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={open ? menuId : undefined}
+        onClick={() => setOpen(!open)}
+        onKeyDown={(e) => {
+          if (e.key === 'ArrowDown' && !open) {
+            e.preventDefault()
+            setOpen(true)
+          }
+        }}
+      >
+        More
+      </button>
+      {open && (
+        <div id={menuId} ref={menuRef} className="row-menu-list" role="menu" aria-label={label} onKeyDown={onMenuKey}>
+          {actions.map((a) => (
+            <button
+              key={a.label}
+              type="button"
+              role="menuitem"
+              tabIndex={-1}
+              onClick={() => {
+                close()
+                a.run()
+              }}
+            >
+              {a.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   )
 }
