@@ -1,0 +1,4 @@
+# Cloudflare Pages config. The site is plain static files in dist/ (there is no server code).
+name = "gradecrunch"
+pages_build_output_dir = "dist"
+compatibility_date = "2026-11-01"

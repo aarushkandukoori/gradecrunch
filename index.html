@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- Keep the name in sync with src/lib/brand.ts (main.tsx also sets the title from it at runtime). -->
+    <title>GradeCrunch - CMU grades and QPA</title>
+    <meta name="description" content="All your CMU grades and your QPA in one place. Pulls scores from Canvas, Gradescope and Autolab, fixes the weights, and shows what you need on the rest of the semester. Runs entirely in your browser." />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="GradeCrunch" />
+    <meta property="og:title" content="GradeCrunch - all your CMU grades and your QPA, in one place" />
+    <meta property="og:description" content="Canvas + Gradescope + Autolab, merged per class. What-if scores, what you need on the final, semester and cumulative QPA. Nothing stored on a server." />
+    <meta property="og:url" content="https://gradecrunch.pages.dev/" />
+    <meta property="og:image" content="https://gradecrunch.pages.dev/og.png" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="theme-color" content="#f7f6f3" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#121211" media="(prefers-color-scheme: dark)" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="referrer" content="no-referrer" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <noscript>This site needs JavaScript to read and compute your grades in your browser.</noscript>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
