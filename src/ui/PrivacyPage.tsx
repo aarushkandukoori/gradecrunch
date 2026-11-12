@@ -1,5 +1,6 @@
 // The /privacy page: what is read, where it goes, what is stored, and how to delete it. Short and plain.
 import { APP_NAME, REPO_URL } from '../lib/brand'
+import { AUTOLAB_SETTING_KEY } from '../lib/extension'
 import { STORE_KEY, THEME_KEY } from '../lib/store'
 import { ExternalLink } from './Link'
 
@@ -40,6 +41,36 @@ export function PrivacyPage() {
         for Canvas, Gradescope and Autolab so it never happens.
       </p>
 
+      <h2>Chrome extension</h2>
+      <p>
+        The {APP_NAME} Chrome extension does the same job as the Sync button without the bookmark: it reads the same
+        grade data, from the same three sites, using the login you already have open in Chrome. Before its first sync
+        it shows a welcome screen explaining this, and it does nothing until you click Continue there.
+      </p>
+      <ul>
+        <li>
+          Access to canvas.cmu.edu, www.gradescope.com and autolab.andrew.cmu.edu: to read your own courses,
+          assignments, scores and letter cutoffs there. It only reads; it never submits or changes anything.
+        </li>
+        <li>
+          Storage: to remember that you finished its welcome screen, and to keep a copy of your last synced grades
+          inside the extension, on your computer. Removing the extension deletes it.
+        </li>
+        <li>
+          Offscreen document: a hidden extension page where it reads Gradescope and Autolab pages, because the part of
+          an extension that runs in the background cannot read web pages by itself.
+        </li>
+      </ul>
+      <p>
+        It hands your grades only to this website ({APP_NAME}), inside your browser. Chrome blocks other websites from
+        asking it for them. It has no server, no analytics and no tracking, and it sends your grades nowhere else.
+        This page stores them in your browser, as listed below.
+      </p>
+      <p>
+        {APP_NAME}'s use of information received from Canvas, Gradescope and Autolab follows the Chrome Web Store User
+        Data Policy, including the Limited Use requirements.
+      </p>
+
       <h2>What is stored</h2>
       <p>Only in your browser's local storage, under these keys:</p>
       <ul>
@@ -48,6 +79,9 @@ export function PrivacyPage() {
         </li>
         <li>
           <code>{THEME_KEY}</code>: light or dark mode, if you picked one.
+        </li>
+        <li>
+          <code>{AUTOLAB_SETTING_KEY}</code>: whether the Chrome extension also syncs Autolab, if you turned it on.
         </li>
       </ul>
 

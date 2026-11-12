@@ -1,6 +1,7 @@
 // Top bar: wordmark, term picker (only with more than one term), Sync button and the settings gear.
-// The site cannot reach Canvas or Gradescope by itself (that is the privacy promise: only the Sync bookmarklet,
-// running in your own logged-in tab, can), so the Sync button opens a small popover saying how.
+// With the GradeCrunch Chrome extension installed, Sync runs the extension's sync right here (spinner + progress).
+// Without it, the site cannot reach Canvas or Gradescope by itself (that is the privacy promise: only the Sync
+// bookmarklet, running in your own logged-in tab, can), so the Sync button opens a small popover saying how.
 import { useEffect, useRef, useState } from 'react'
 import { APP_NAME, AUTOLAB_ORIGIN, CANVAS_ORIGIN, GRADESCOPE_ORIGIN } from '../lib/brand'
 import { timeAgo } from '../lib/format'
@@ -17,6 +18,8 @@ interface Props {
   lastSync: Store['lastSync']
   now: number
   onOpenSettings: () => void
+  // Set when the Chrome extension is installed: Sync calls onSync instead of opening the bookmarklet popover.
+  extSync?: { onSync: () => void; syncing: boolean; progress: string | null }
 }
 
 /** "Canvas 5 min ago · Gradescope not synced" (Autolab only once it has been used). */
@@ -67,7 +70,21 @@ export function Header(p: Props) {
               </select>
             </label>
           )}
-          {p.showDashboard && (
+          {p.showDashboard && p.extSync && (
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={p.extSync.onSync}
+              disabled={p.extSync.syncing}
+              title={`Last sync: ${syncLine(p.lastSync, p.now)}`}
+            >
+              <SyncIcon className={p.extSync.syncing ? 'spin' : undefined} />
+              <span className="sync-label" aria-live="polite">
+                {p.extSync.syncing ? (p.extSync.progress ?? 'Syncing…') : 'Sync'}
+              </span>
+            </button>
+          )}
+          {p.showDashboard && !p.extSync && (
             <div className="popover-wrap" ref={wrapRef}>
               <button
                 type="button"

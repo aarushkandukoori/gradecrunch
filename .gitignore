@@ -9,3 +9,6 @@ coverage/
 .claude/
 CLAUDE.md
 AGENTS.md
+dist-extension/
+dist-extension-store/
+gradecrunch-extension.zip

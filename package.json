@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "node scripts/build-bookmarklet.mjs && vite",
     "build": "node scripts/build-bookmarklet.mjs && tsc --noEmit -p tsconfig.json && vite build",
+    "build:extension": "tsc --noEmit -p extension/tsconfig.json && node scripts/build-extension.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "preview": "wrangler pages dev dist"

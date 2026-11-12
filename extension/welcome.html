@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Welcome to GradeCrunch</title>
+    <link rel="icon" href="icons/icon32.png" />
+    <link rel="stylesheet" href="welcome.css" />
+    <!-- Extension pages cannot run inline scripts, so the button logic lives in welcome.js. -->
+    <script src="welcome.js" defer></script>
+  </head>
+  <body>
+    <main>
+      <header>
+        <img src="icons/icon48.png" width="48" height="48" alt="" />
+        <h1>GradeCrunch</h1>
+      </header>
+      <p class="lead">See all your grades and your QPA in one place. Before it reads anything, here is exactly what it does.</p>
+
+      <h2>What it reads</h2>
+      <p>
+        Your own courses, assignments, scores and letter-grade cutoffs on <b>canvas.cmu.edu</b>, <b>gradescope.com</b> and
+        <b>autolab.andrew.cmu.edu</b>. It uses the login you already have in this browser. It never sees or asks for your
+        password, and it only reads these pages when the GradeCrunch site asks it to sync.
+      </p>
+
+      <h2>Where it goes</h2>
+      <p>
+        Only to the GradeCrunch site open in your own browser. It is never sent to a server. Nothing is sold or shared
+        with anyone. The extension keeps a copy of your last successful sync in its own storage on this computer;
+        removing the extension deletes it.
+      </p>
+      <p>
+        GradeCrunch's use of this information follows the
+        <a href="https://developer.chrome.com/docs/webstore/program-policies/" target="_blank" rel="noopener">Chrome Web Store User Data Policy</a>,
+        including the Limited Use requirements. Full details:
+        <a href="https://grades.aarushkandukoori.com/privacy" target="_blank" rel="noopener">privacy policy</a>.
+      </p>
+
+      <h2>How to remove it</h2>
+      <p>
+        Right-click the GradeCrunch icon in the toolbar and choose <b>Remove from Chrome</b>, or open
+        <b>chrome://extensions</b> and click <b>Remove</b>. That deletes everything the extension stored.
+      </p>
+
+      <button id="continue" type="button">Continue</button>
+      <p id="status" class="status" role="status"></p>
+
+      <p class="fine">
+        GradeCrunch is a student project. It is not affiliated with or endorsed by Carnegie Mellon University,
+        Instructure (Canvas), Gradescope or Autolab.
+      </p>
+    </main>
+  </body>
+</html>

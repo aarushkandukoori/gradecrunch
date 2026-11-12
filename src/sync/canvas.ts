@@ -68,6 +68,20 @@ export function sameOriginFetcher(): PageFetcher {
   }
 }
 
+/**
+ * For the Chrome extension: full-URL requests to `origin` (e.g. "https://canvas.cmu.edu"). The extension has a host
+ * permission for Canvas, so Chrome attaches the student's Canvas cookies and lets us read the Link header.
+ */
+export function absoluteFetcher(origin: string): PageFetcher {
+  return async (path) => {
+    const res = await fetch(origin + '/api/v1/' + path, {
+      credentials: 'include',
+      headers: { Accept: 'application/json' },
+    })
+    return readPage(res, nextPathFromLink(res.headers.get('Link')), 'Log in to Canvas first')
+  }
+}
+
 /** Follow `next` links until the last page and return all rows in one array. */
 export async function fetchAll(fetchPage: PageFetcher, path: string): Promise<unknown[]> {
   const rows: unknown[] = []

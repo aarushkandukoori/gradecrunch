@@ -1,7 +1,9 @@
 // The whole app. It owns the saved store, turns it into courses + grades + QPA, picks which page to show
 // (home / one class / setup / privacy, mirrored in the URL), and handles syncing: the Sync bookmarklet opens this site at
 // /#receive and hands the grades over by postMessage (see ui/receive.ts), or, when a popup blocker gets in the
-// way, sends them in a #sync= link that we read once on load. Every sync can be undone from its toast.
+// way, sends them in a #sync= link that we read once on load. With the GradeCrunch Chrome extension installed, the
+// Sync button asks the extension instead (see lib/extension.ts), and the app syncs by itself on load when the last
+// sync is more than 10 minutes old. Every sync can be undone from its toast.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { buildClaudePrompt } from './lib/askClaude'
 import { catalogReady, loadCatalog } from './lib/catalog'
@@ -10,7 +12,20 @@ import { BOOKMARKLET_VERSION, parseSyncFragment, RECEIVE_HASH } from './lib/book
 import { plural } from './lib/format'
 import { gradeCourse, neededForLetters } from './lib/grade'
 import { buildCourses, rekeyPrefs, termsOf } from './lib/merge'
-import { decodePayload } from './lib/payload'
+import {
+  browserExtension,
+  getAutolabSetting,
+  loginSources,
+  mergeNotes,
+  needsAutoSync,
+  pickSources,
+  setAutolabSetting,
+  type ExtensionClient,
+  type ExtensionInfo,
+  type ExtSource,
+  type SyncNote,
+} from './lib/extension'
+import { decodePayload, validatePayload } from './lib/payload'
 import { computeQpa } from './lib/qpa'
 import {
   addManualCourse,
@@ -33,6 +48,7 @@ import type { Course, CoursePrefs, ManualCourse, NeededResult, Settings, Store, 
 import { ClaudeDialog } from './ui/ClaudeDialog'
 import { ClassView } from './ui/ClassView'
 import { Dashboard, type ReturnTo } from './ui/Dashboard'
+import { FinishSetup, SyncNotes, type ExtensionView } from './ui/ExtensionBits'
 import { Footer } from './ui/Footer'
 import { Header } from './ui/Header'
 import { classKeyFromPath, classPath, VIEW_PATHS, viewFromPath, type View } from './ui/Link'
@@ -46,7 +62,11 @@ import { EMPTY_GRADE, isManualOnly, neededFor, pickTerm, splitCourses, termsWith
 const CLAUDE_URL = 'https://claude.ai/new'
 const SOURCE_NAMES: Record<SyncPayload['kind'], string> = { canvas: 'Canvas', gradescope: 'Gradescope', autolab: 'Autolab' }
 
-export default function App() {
+interface AppProps {
+  extension?: ExtensionClient // the Chrome extension client; tests pass a fake one
+}
+
+export default function App({ extension = browserExtension }: AppProps) {
   const [store, setStore] = useState<Store>(loadStore)
   const [view, setView] = useState<View>(() => viewFromPath(window.location.pathname))
   // The class open at /class/<key>, or null on any other page.
@@ -323,6 +343,137 @@ export default function App() {
     }
   }, [importFragment, applySync, checkVersion])
 
+  // ------------------------------------------------------------ the Chrome extension
+
+  const [ext, setExt] = useState<ExtensionInfo | null>(null) // null = not installed (or not found yet)
+  const [extSyncing, setExtSyncing] = useState(false)
+  const [extProgress, setExtProgress] = useState<string | null>(null)
+  const [notes, setNotes] = useState<SyncNote[]>([]) // "Log in to Gradescope" and error lines from the last sync
+  const [autolabOn, setAutolabOn] = useState(getAutolabSetting)
+  const syncingRef = useRef(false) // a ref too, so a focus event during a sync can't start a second one
+  const notesRef = useRef(notes)
+  const storeRef = useRef(store)
+  useEffect(() => {
+    notesRef.current = notes
+    storeRef.current = store
+  }, [notes, store])
+
+  /** Asks the extension for these sites and applies what comes back, one Undo toast per site. */
+  const runExtensionSync = useCallback(
+    async (info: ExtensionInfo, sources: ExtSource[]) => {
+      if (syncingRef.current) return
+      syncingRef.current = true
+      setExtSyncing(true)
+      setExtProgress(null)
+      try {
+        const { results } = await extension.sync(info.id, sources, (p) => setExtProgress(p.message))
+        const fresh: SyncNote[] = []
+        for (const r of results) {
+          if (r.status === 'ok') {
+            try {
+              applySync(validatePayload(r.payload)) // the payload crossed a trust boundary: check it like a #sync link
+            } catch (err) {
+              fresh.push({ kind: 'error', source: r.source, message: err instanceof Error ? err.message : String(err) })
+            }
+          } else if (r.status === 'login') {
+            fresh.push({ kind: 'login', source: r.source, url: r.loginUrl })
+          } else {
+            fresh.push({ kind: 'error', source: r.source, message: r.message })
+          }
+        }
+        setNotes((old) => mergeNotes(old, sources, fresh))
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        if (message === 'consent') {
+          // The extension says its welcome page isn't finished: show the "Finish setting up" card.
+          setExt({ ...info, consent: false })
+          setNotes([])
+        } else {
+          setNotes((old) => mergeNotes(old, [], [{ kind: 'error', source: null, message }]))
+        }
+      } finally {
+        syncingRef.current = false
+        setExtSyncing(false)
+        setExtProgress(null)
+      }
+    },
+    [extension, applySync],
+  )
+
+  /** Canvas + Gradescope, plus Autolab when it has data here or the setting is on. */
+  const sourcesToSync = useCallback((): ExtSource[] => {
+    const s = storeRef.current
+    const hasAutolab = Boolean(s.lastSync.autolab) || Object.values(s.synced).some((c) => c.source === 'autolab')
+    return pickSources(hasAutolab, autolabOn)
+  }, [autolabOn])
+
+  const openWelcome = useCallback(
+    (info: ExtensionInfo) => {
+      extension.openWelcome(info.id).catch(() => toast("Couldn't open the extension. Click its icon in the toolbar.", { tone: 'error' }))
+    },
+    [extension, toast],
+  )
+
+  // Look for the extension once on load (StrictMode runs effects twice in development, hence the ref).
+  const detectStartedRef = useRef(false)
+  useEffect(() => {
+    if (detectStartedRef.current) return
+    detectStartedRef.current = true
+    extension
+      .detect()
+      .then((info) => info && setExt(info))
+      .catch(() => {}) // no extension: the bookmarklet keeps working
+  }, [extension])
+
+  // Sync by itself once, as soon as the extension is ready (on load, or right after its welcome page is done),
+  // unless the grades are fresh (synced in the last 10 minutes) or the sample data is showing.
+  const autoSyncedRef = useRef(false)
+  useEffect(() => {
+    if (!ext?.consent || autoSyncedRef.current) return
+    autoSyncedRef.current = true
+    const s = storeRef.current
+    if (!s.demo && needsAutoSync(s.lastSync, Date.now())) void runExtensionSync(ext, sourcesToSync())
+  }, [ext, runExtensionSync, sourcesToSync])
+
+  // Coming back to this tab: after logging in to a site in another tab, re-sync just the sites that needed it.
+  // After finishing the extension's welcome page, ask the extension again so the "Finish setting up" card goes away.
+  useEffect(() => {
+    if (!ext) return
+    const onBack = () => {
+      if (document.visibilityState === 'hidden') return
+      if (!ext.consent) {
+        extension
+          .detect()
+          .then((info) => info && info.consent && setExt(info))
+          .catch(() => {})
+        return
+      }
+      const sites = loginSources(notesRef.current)
+      if (sites.length > 0) void runExtensionSync(ext, sites)
+    }
+    window.addEventListener('focus', onBack)
+    document.addEventListener('visibilitychange', onBack)
+    return () => {
+      window.removeEventListener('focus', onBack)
+      document.removeEventListener('visibilitychange', onBack)
+    }
+  }, [ext, extension, runExtensionSync])
+
+  const extView: ExtensionView | null = ext && {
+    version: ext.version,
+    consent: ext.consent,
+    syncing: extSyncing,
+    progress: extProgress,
+    notes,
+    onSync: () => void runExtensionSync(ext, sourcesToSync()),
+    onOpenWelcome: () => openWelcome(ext),
+  }
+
+  function changeAutolab(on: boolean) {
+    setAutolabSetting(on)
+    setAutolabOn(on)
+  }
+
   // ------------------------------------------------------------ theme, data
 
   function changeTheme(t: Theme) {
@@ -362,6 +513,7 @@ export default function App() {
         onAddManual={addManual}
         onDemo={startDemo}
         onBack={hasData ? () => navigate('home') : undefined}
+        ext={extView}
       />
     )
   } else if (openCourse) {
@@ -403,6 +555,9 @@ export default function App() {
         onEndDemo={endDemo}
         onSetup={() => navigate('setup')}
         returnTo={returnTo}
+        notice={
+          extView && !extView.consent ? <FinishSetup onOpenWelcome={extView.onOpenWelcome} /> : <SyncNotes notes={notes} />
+        }
       />
     )
   }
@@ -421,6 +576,16 @@ export default function App() {
         lastSync={store.lastSync}
         now={now}
         onOpenSettings={() => setSettingsOpen(true)}
+        extSync={
+          extView
+            ? {
+                // Before the extension's welcome page is done, Sync opens that page instead.
+                onSync: extView.consent ? extView.onSync : extView.onOpenWelcome,
+                syncing: extSyncing,
+                progress: extProgress,
+              }
+            : undefined
+        }
       />
       <main id="main" className="container main">
         {page}
@@ -437,6 +602,7 @@ export default function App() {
         onDeleteAll={deleteAll}
         qpa={qpa}
         newestTerm={newestTerm}
+        autolab={ext ? { on: autolabOn, onChange: changeAutolab } : undefined}
       />
       <ClaudeDialog text={claudeText} onClose={() => setClaudeText(null)} />
       <Toasts toasts={toasts} onDismiss={dismiss} />

@@ -5,6 +5,7 @@ import { BOOKMARKLET_VERSION } from '../lib/bookmarklet'
 import type { ManualCourse } from '../types'
 import { AddClassDialog } from './AddClassDialog'
 import { ConnectCard, ConnectTrouble } from './ConnectCard'
+import type { ExtensionView } from './ExtensionBits'
 import { ChevronIcon } from './icons'
 import { NavLink, type Navigate } from './Link'
 import type { PushToast } from './Toasts'
@@ -17,6 +18,7 @@ interface Props {
   onDemo: () => void
   onAddManual: (course: ManualCourse) => void
   onBack?: () => void // on /setup once there are grades: a way back to them
+  ext: ExtensionView | null // the Chrome extension, or null when it is not installed
 }
 
 export function Welcome(p: Props) {
@@ -34,6 +36,11 @@ export function Welcome(p: Props) {
           <h1>All your CMU grades in one place.</h1>
           <p className="lead">Your Canvas and Gradescope scores, merged per class, with your QPA.</p>
         </section>
+      ) : p.ext ? (
+        <section className="hero">
+          <h1>Sync your grades</h1>
+          <p className="lead">The GradeCrunch extension is installed. One click brings your grades here.</p>
+        </section>
       ) : (
         <section className="hero">
           <h1>Set up the Sync button</h1>
@@ -41,7 +48,7 @@ export function Welcome(p: Props) {
         </section>
       )}
 
-      <ConnectCard toast={p.toast} />
+      <ConnectCard toast={p.toast} ext={p.ext} />
 
       <div className="welcome-links">
         {p.mode === 'welcome' && (
@@ -54,14 +61,15 @@ export function Welcome(p: Props) {
         </button>
       </div>
 
-      <ConnectTrouble toast={p.toast} />
+      {!p.ext && <ConnectTrouble toast={p.toast} />}
 
       <p className="privacy-line muted small">
         Your grades stay in this browser. Nothing goes to a server.{' '}
         <NavLink to="privacy" navigate={p.navigate}>
           Privacy
         </NavLink>
-        {p.mode === 'setup' && <> · Sync button version {BOOKMARKLET_VERSION}</>}
+        {p.mode === 'setup' &&
+          (p.ext ? <> · Extension version {p.ext.version}</> : <> · Sync button version {BOOKMARKLET_VERSION}</>)}
       </p>
 
       <AddClassDialog open={adding} onClose={() => setAdding(false)} term={p.term} onAdd={p.onAddManual} />

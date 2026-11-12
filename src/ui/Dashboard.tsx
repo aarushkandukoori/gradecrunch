@@ -1,6 +1,6 @@
 // The home page once there are grades: the semester QPA, then one simple row per class. Clicking a row opens
 // that class (ClassView). Hidden classes, "add a class by hand" and Ask Claude are small links under the list.
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { courseLabel, formatGradePercent, formatQpa, plural } from '../lib/format'
 import { estimatedLetter } from '../lib/qpa'
 import { activeWhatIfs } from '../lib/whatIfs'
@@ -25,6 +25,7 @@ interface Props {
   onEndDemo: () => void
   onSetup: () => void
   returnTo: ReturnTo | null // the class we just came back from: put focus and scroll back on its row
+  notice?: ReactNode // extension messages ("Finish setting up", "Log in to Gradescope"), shown above the QPA
 }
 
 /** Where the student was in the list before opening a class. */
@@ -89,6 +90,8 @@ export function Dashboard(p: Props) {
           </div>
         </div>
       )}
+
+      {p.notice}
 
       <section className="summary" aria-labelledby="qpa-title">
         <h1 id="qpa-title" className="summary-term">

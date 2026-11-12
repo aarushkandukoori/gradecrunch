@@ -1,4 +1,5 @@
-// Settings: level, theme, QPA extras (college, cumulative QPA, Dean's List), export / import / delete everything.
+// Settings: level, theme, QPA extras (college, cumulative QPA, Dean's List), the extension's Autolab switch,
+// export / import / delete everything.
 import { useState, type ChangeEvent } from 'react'
 import { APP_SLUG } from '../lib/brand'
 import { exportStoreJson, parseStore, type Theme } from '../lib/store'
@@ -18,6 +19,8 @@ interface Props {
   onDeleteAll: () => void
   qpa: QpaResult
   newestTerm: boolean
+  // Only when the Chrome extension is installed: whether its sync also reads Autolab (beta).
+  autolab?: { on: boolean; onChange: (on: boolean) => void }
 }
 
 const THEMES: { value: Theme; label: string }[] = [
@@ -92,6 +95,17 @@ export function SettingsDialog(p: Props) {
         </fieldset>
 
         <QpaExtras qpa={p.qpa} settings={s} onSettings={p.onSettings} newestTerm={p.newestTerm} />
+
+        {p.autolab && (
+          <div className="settings-block">
+            <h3>Chrome extension</h3>
+            <label className="check">
+              <input type="checkbox" checked={p.autolab.on} onChange={(e) => p.autolab?.onChange(e.target.checked)} />
+              Also sync Autolab (beta)
+            </label>
+            <p className="muted small">For classes graded on Autolab, like 15-122 or 15-213.</p>
+          </div>
+        )}
 
         <div className="settings-block">
           <h3>Your data</h3>
