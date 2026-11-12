@@ -45,6 +45,15 @@ export interface GradeCut {
   min: number // percent, 0-100
 }
 
+/** A syllabus (or the course home page) the sync found, so the app can read the real grading weights. */
+export interface SyllabusDoc {
+  source: 'canvas-syllabus' | 'canvas-front-page' | 'canvas-file'
+  name: string // e.g. "Syllabus page" or "sylb.pdf"
+  url: string | null // https link to it on Canvas
+  text?: string // plain text (always set once stored; HTML sources arrive as text)
+  pdfBase64?: string // raw PDF bytes in a sync payload only; the app turns it into `text` before saving
+}
+
 /** One course as one source sees it. */
 export interface SyncedCourse {
   source: Source
@@ -61,6 +70,7 @@ export interface SyncedCourse {
   canvasGrade: string | null // Canvas's own current letter, when shown
   scheme: GradeCut[] | null // the course's letter scheme from Canvas, sorted by min descending
   syncedAt: string // ISO time of the sync
+  syllabus?: SyllabusDoc[] // Canvas only: syllabus page / home page / syllabus files, for the grading weights
 }
 
 /** What the bookmarklet (or token sync) hands to the app. */
@@ -138,6 +148,7 @@ export interface Category {
   key: string
   name: string
   weight: number | null // effective weight percent after prefs; null in points mode
+  weightSource?: 'you' | 'syllabus' | 'canvas' // where `weight` came from
   dropLowest: number
   dropHighest: number
   neverDrop: string[] // item keys
