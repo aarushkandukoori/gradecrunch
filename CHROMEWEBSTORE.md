@@ -57,7 +57,7 @@ estimated QPA, on the GradeCrunch website. (**1.1.0** - name SIO next to Autolab
 | Store Icon | 128x128 PNG | Ready | extension/icons/icon128.png (inside the zip) |
 | Screenshot 1 | 1280x800 | Ready | store/screenshot-2-dashboard.png |
 | Screenshot 2 | 1280x800 | Ready | store/screenshot-3-class.png |
-| Screenshot 3 | 1280x800 | Replace | store/screenshot-1-welcome.png |
+| Screenshot 3 | 1280x800 | Ready | store/screenshot-1-welcome.png |
 | Small Promo Tile | 440x280 | Ready | store/promo-tile-440x280.png |
 | Marquee Promo Tile | 1400x560 | Not made (optional) | |
 
@@ -69,9 +69,9 @@ All sizes checked 2026-11-13.
   for an A. Demo data.
 - Screenshot 2 (class page, 15-122) - percent and letter, what you need for each letter, assignments by category with
   weights, the what-if switch. Demo data.
-- Screenshot 3 - the current file is the old website home page (bookmarklet steps and "A Chrome extension is coming
-  soon"), which is wrong for the extension's own listing. Replace it with the extension's welcome page (what it reads,
-  where it goes, the syllabus PDF checkbox) or leave it out.
+- Screenshot 3 (extension welcome page) - what it reads, where it goes, how to remove it, the syllabus PDF checkbox
+  and Continue, as a student sees it right after installing. Taken from the v1.1.0 build on 2026-11-13 at 83% zoom so
+  the whole page down to Continue fits in 1280x800. Retake it once the welcome page mentions SIO.
 
 ## Permissions Justification
 
@@ -157,10 +157,10 @@ still has to be added for 1.1.0.
 - [ ] Developer account registered (steps in `store/LISTING.md`).
 - [ ] Fresh `npm run build:extension`, then upload `gradecrunch-extension.zip` (it holds only the extension's own
   files, no source, tests or docs).
-- [ ] Screenshot 3 replaced (see Screenshot Notes).
+- [x] Screenshot 3 replaced with the extension's welcome page (2026-11-13).
 - [ ] Site deployed, so the privacy policy covers syllabi and the PDF permission.
 - [ ] **1.1.0** - SIO added to the store description, the privacy policy and the extension's welcome page (its "What it
-  reads" still lists only Canvas, Gradescope and Autolab).
+  reads" still lists only Canvas, Gradescope and Autolab), then screenshot 3 retaken.
 - [ ] **Ask chat** - if it ships, the site sends a summary of the student's grades (collected by this extension) and
   their saved notes to OpenAI through its `/api/chat` function whenever the student uses the chat
   (`functions/api/chat.ts`, not committed yet). "Nothing goes to a server" (manifest description, store description,
