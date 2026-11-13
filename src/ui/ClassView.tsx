@@ -38,9 +38,10 @@ export function ClassView({ course, grade, needed, settings, qpaRow, onBack, onP
   if (whatIf) facts.push('Includes what-if scores')
 
   // At most two short notes, only the ones that change how to read the grade. With what-ifs on, the percent is
-  // made up, so "Canvas shows 89.1%" would only look like a mismatch.
+  // made up, so "Canvas shows 89.1%" would only look like a mismatch. When we use the syllabus's weights, the
+  // Weights line already explains why Canvas's number differs, so the warning would only repeat it.
   const notes = courseWarnings(course, grade)
-    .filter((n) => !(whatIf && n.startsWith('Canvas shows')))
+    .filter((n) => !((whatIf || course.weightNote) && n.startsWith('Canvas shows')))
     .slice(0, 2)
 
   return (

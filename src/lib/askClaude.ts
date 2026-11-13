@@ -50,7 +50,16 @@ export function buildClaudePrompt(
   }
   if (qpa.cumulativeQpa != null) {
     lines.push(`Estimated cumulative QPA after this semester${qpaNote}: ${formatQpa(qpa.cumulativeQpa)}`)
+    // The starting point, so Claude can redo the cumulative math too (e.g. after a class goes pass/fail).
+    if (settings.priorQpa != null && settings.priorUnits != null) {
+      lines.push(`My cumulative QPA before this semester: ${formatQpa(settings.priorQpa)} from ${settings.priorUnits} factorable units`)
+    }
   }
+  // Claude only sees this text, so tell it how to handle a pass/fail change the student mentions later in the chat.
+  lines.push(
+    "If I tell you I'm taking a class pass/fail, leave it out of the QPA (pass/fail classes don't count toward the QPA at CMU), " +
+      'then recalculate my semester QPA (and cumulative QPA, if given) from the other classes below and show the math.',
+  )
   if (anyWhatIf) {
     lines.push('Note: some grades below include hypothetical what-if scores I typed in (marked "what-if" below). They are not real grades yet.')
   }
@@ -70,6 +79,15 @@ export function buildClaudePrompt(
       lines.push(`  What-if scores included (not real): ${list.join('; ')}`)
     }
     if (course.prefs.passFail) lines.push('  Taken pass/fail')
+    // Whether this class is in the QPA above, with its grade points, so Claude can take it out and redo the math.
+    const row = qpa.rows.find((r) => r.courseKey === course.key)
+    if (row) {
+      lines.push(
+        row.factorable && row.points != null
+          ? `  Counts toward QPA: yes (${row.letter} = ${formatPoints(row.points)} grade points x ${row.units} units)`
+          : `  Counts toward QPA: no (${row.reason ?? 'not factorable'})`,
+      )
+    }
     if (course.prefs.letter) lines.push(`  Final letter set by me: ${course.prefs.letter}`)
     if (course.categories.length) {
       lines.push(`  Grading: ${course.weighted ? 'weighted categories' : 'total points'}`)

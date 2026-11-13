@@ -10,6 +10,7 @@
   "background": { "service_worker": "background.js" },
   "permissions": ["storage", "offscreen"],
   "host_permissions": ["https://canvas.cmu.edu/*", "https://www.gradescope.com/*", "https://autolab.andrew.cmu.edu/*"],
+  "optional_host_permissions": ["https://*.inscloudgate.net/*"],
   "externally_connectable": {
     "matches": ["https://grades.aarushkandukoori.com/*", "https://gradecrunch.pages.dev/*", "http://localhost/*"]
   },

@@ -9,12 +9,13 @@
 import type { SyncPayload } from '../src/types'
 import { APP_NAME } from '../src/lib/brand'
 import { encodePayload } from '../src/lib/payload'
-import { sameOriginFetcher, syncCanvas } from '../src/sync/canvas'
+import { sameOriginBinaryFetcher, sameOriginFetcher, syncCanvas, withoutSyllabusPdfs } from '../src/sync/canvas'
 import { syncGradescope } from '../src/sync/gradescope'
 import { syncAutolab } from '../src/sync/autolab'
 import { BOOKMARKLET_VERSION } from './version'
 import {
   detectSite,
+  MAX_MESSAGE_CHARS,
   MSG_DONE,
   MSG_READY,
   MSG_SYNC,
@@ -29,6 +30,33 @@ export { detectSite, type IncomingMessage, type Site } from './protocol'
 /** The fallback URL: our site + payload in the fragment + bookmarklet version. */
 export function syncUrl(siteOrigin: string, encoded: string): string {
   return siteOrigin + '/#sync=' + encoded + '&bv=' + BOOKMARKLET_VERSION
+}
+
+/**
+ * Longest fallback link we build. Chrome accepts URLs up to 2 MB; syllabus PDFs (base64 in the payload) can be bigger
+ * than that, so the fallback link leaves them out when they do not fit.
+ */
+export const MAX_FALLBACK_URL = 1_500_000
+
+/** The fallback link, without the syllabus PDFs if they would make it too long (the postMessage path keeps them). */
+export async function fallbackUrl(siteOrigin: string, payload: SyncPayload, encoded: string): Promise<string> {
+  const url = syncUrl(siteOrigin, encoded)
+  if (url.length <= MAX_FALLBACK_URL) return url
+  const smaller = withoutSyllabusPdfs(payload)
+  smaller.warnings = [...smaller.warnings, 'Syllabus PDFs were too big for this link. Allow pop-ups for Canvas and sync again to include them.']
+  return syncUrl(siteOrigin, await encodePayload(smaller))
+}
+
+/**
+ * The grades as one string for the postMessage handoff. If the syllabus PDFs make it longer than the app accepts
+ * (MAX_MESSAGE_CHARS), they are left out with a warning; the Syllabus page text and the grades still go.
+ */
+export async function messagePayload(payload: SyncPayload, maxChars = MAX_MESSAGE_CHARS): Promise<string> {
+  const encoded = await encodePayload(payload)
+  if (encoded.length < maxChars) return encoded
+  const smaller = withoutSyllabusPdfs(payload)
+  smaller.warnings = [...smaller.warnings, 'Syllabus PDFs were too big to send, so they were left out.']
+  return encodePayload(smaller)
 }
 
 /** Gradescope pages are HTML, fetched with the student's cookies. */
@@ -74,7 +102,8 @@ export function realDeps(siteOrigin: string): RunDeps {
   return {
     hostname: location.hostname,
     siteOrigin,
-    syncCanvas: (p) => syncCanvas(sameOriginFetcher(), p),
+    // Also reads syllabi (Syllabus page, home page, syllabus PDFs): same-origin, so PDFs need no extra permission.
+    syncCanvas: (p) => syncCanvas(sameOriginFetcher(), p, { syllabus: { fetchBinary: sameOriginBinaryFetcher() } }),
     syncGradescope: (p) => syncGradescope(gradescopeFetchText, p),
     syncAutolab: (p) => syncAutolab(autolabFetchPage, p),
     // No "noopener": the new tab needs window.opener to send us its "ready" message.
@@ -175,7 +204,7 @@ export async function runSync(deps: RunDeps): Promise<void> {
     const sync = { canvas: deps.syncCanvas, gradescope: deps.syncGradescope, autolab: deps.syncAutolab }[site]
     const payload = await sync((msg) => overlay.setStatus(msg))
     if (cancelled) return
-    const encoded = await encodePayload(payload)
+    const encoded = await messagePayload(payload)
     if (cancelled) return
 
     // Main path: hand the grades to the GradeCrunch tab.
@@ -211,11 +240,13 @@ export async function runSync(deps: RunDeps): Promise<void> {
     // Fallback: the popup was blocked or never said "ready". Navigate this tab with the data in the fragment.
     dropReceiver()
     overlay.setStatus('Opening ' + APP_NAME + '...')
+    const url = await fallbackUrl(deps.siteOrigin, payload, encoded)
+    if (cancelled) return
     // Clear the guard now: if the student comes Back to this page and the browser restores it from its cache,
     // our code would still think a sync is running and ignore the next click.
     w.__gradeSyncRunning = false
     window.addEventListener('pageshow', () => overlay.remove(), { once: true }) // restored from cache: drop the stale box
-    deps.navigate(syncUrl(deps.siteOrigin, encoded))
+    deps.navigate(url)
   } catch (err) {
     if (cancelled) return
     dropReceiver()

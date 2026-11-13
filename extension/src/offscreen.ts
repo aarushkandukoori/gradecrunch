@@ -14,6 +14,7 @@ import { runSource } from './sync'
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!isOffscreenSyncRequest(message)) return undefined // not for us (e.g. our own progress messages)
   const { source } = message
+  const pdfs = message.pdfs === true // only the service worker can check the PDF permission, so it tells us
 
   // Each progress line goes back to the service worker, which relays it to the website.
   const onProgress = (text: string) => {
@@ -21,6 +22,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     chrome.runtime.sendMessage(progress).catch(() => {}) // the service worker may be busy restarting: skip one line
   }
 
-  void runSource(source, onProgress).then(sendResponse)
+  void runSource(source, onProgress, { pdfs }).then(sendResponse)
   return true // tells Chrome we will call sendResponse later, after the sync finishes
 })

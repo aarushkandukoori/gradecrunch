@@ -13,12 +13,23 @@ vi.mock('../src/lib/courseNumber', () => ({
     }
     return { number: found[0] ?? null, also: found.slice(1) }
   },
+  // Only "Fall 2026"-style names are needed here: year * 10 + season, -1 when unreadable.
+  termSortKey: (term: string | null | undefined) => {
+    const m = (term ?? '').match(/(Spring|Summer|Fall) (\d{4})/)
+    return m ? Number(m[2]) * 10 + { Spring: 1, Summer: 2, Fall: 3 }[m[1] as 'Spring' | 'Summer' | 'Fall'] : -1
+  },
 }))
 
 import {
+  absoluteBinaryFetcher,
+  bytesToBase64,
   CanvasAuthError,
   CanvasHttpError,
+  collectSyllabus,
+  decodeEntities,
   fetchAll,
+  findFileLinks,
+  htmlToText,
   itemStatus,
   mapAssignment,
   mapGroup,
@@ -27,8 +38,11 @@ import {
   nextPathFromLink,
   parseCanvasJson,
   pickEnrollment,
+  sameOriginBinaryFetcher,
   sameOriginFetcher,
   syncCanvas,
+  withoutSyllabusPdfs,
+  type BinaryFetcher,
   type PageFetcher,
 } from '../src/sync/canvas'
 
@@ -471,5 +485,359 @@ describe('syncCanvas', () => {
     const payload = await syncCanvas(async () => ({ data: [], next: null }))
     expect(payload.courses).toEqual([])
     expect(payload.warnings).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------- syllabi (synthetic syllabus text only)
+
+/** A made-up syllabus page in the shape Canvas's rich editor produces. */
+const SYLLABUS_HTML =
+  '<h2>Course Policies</h2>' +
+  '<p>Your grade is computed as follows:</p>' +
+  '<ul><li>Average Homework Score: 15%</li><li>Average Quiz Score:&nbsp;15%</li>' +
+  '<li>Midterm 1: <strong>20%</strong></li><li>Midterm 2: 20%</li><li>Final Exam: 30%</li></ul>' +
+  '<table><tbody><tr><td>A</td><td>90&ndash;100</td></tr></tbody></table>' +
+  '<p>Questions? Read the <a href="/courses/103/files/900?wrap=1">Syllabus (PDF)</a> &amp; ask.<br>Thanks</p>' +
+  '<script>alert(1)</script><style>p{color:red}</style>'
+
+const pdfBytes = (body = 'synthetic syllabus') => new TextEncoder().encode('%PDF-1.4\n' + body)
+
+describe('htmlToText', () => {
+  test('keeps one line per paragraph, list item, cell and heading', () => {
+    expect(htmlToText(SYLLABUS_HTML)).toBe(
+      [
+        'Course Policies',
+        '',
+        'Your grade is computed as follows:',
+        '',
+        'Average Homework Score: 15%',
+        '',
+        'Average Quiz Score: 15%',
+        '',
+        'Midterm 1: 20%',
+        '',
+        'Midterm 2: 20%',
+        '',
+        'Final Exam: 30%',
+        '',
+        'A',
+        '',
+        '90-100',
+        '',
+        'Questions? Read the Syllabus (PDF) & ask.',
+        'Thanks',
+      ].join('\n'),
+    )
+  })
+  test('drops scripts, styles and comments; empty HTML gives empty text', () => {
+    expect(htmlToText('<p>x</p><!-- hidden 50% --><script>var y = "40%"</script>')).toBe('x')
+    expect(htmlToText('')).toBe('')
+    expect(htmlToText('<p> </p><br/>')).toBe('')
+  })
+})
+
+describe('decodeEntities', () => {
+  test('named and numeric entities, decoded once', () => {
+    expect(decodeEntities('A &amp; B &lt;3 &#37; &#x25; &nbsp;x')).toBe('A & B <3 % %  x')
+    expect(decodeEntities('&amp;lt;')).toBe('&lt;') // not decoded twice
+    expect(decodeEntities('&unknown; &#0;')).toBe('&unknown; &#0;')
+  })
+})
+
+describe('findFileLinks', () => {
+  test('relative and absolute Canvas file links with their text; other sites ignored', () => {
+    const html =
+      '<a href="/courses/5/files/11/download">Syllabus</a>' +
+      '<a class="x" href="https://canvas.cmu.edu/courses/5/files/12?verifier=abc&amp;wrap=1"><b>Course</b> info</a>' +
+      '<a href="/files/13">here</a>' +
+      '<a href="https://evil.example/courses/5/files/14">Syllabus</a>' +
+      '<a href="/courses/5/pages/syllabus">Syllabus page</a>'
+    expect(findFileLinks(html)).toEqual([
+      { fileId: '11', text: 'Syllabus' },
+      { fileId: '12', text: 'Course info' },
+      { fileId: '13', text: 'here' },
+    ])
+  })
+})
+
+describe('bytesToBase64 / withoutSyllabusPdfs', () => {
+  test('round-trips through atob, including big inputs', () => {
+    const big = new Uint8Array(100_000).map((_, i) => i % 256)
+    const back = Uint8Array.from(atob(bytesToBase64(big)), (c) => c.charCodeAt(0))
+    expect(back).toEqual(big)
+    expect(bytesToBase64(new TextEncoder().encode('%PDF'))).toBe('JVBERg==')
+  })
+  test('removes only the PDF bytes', () => {
+    const course = { sourceId: '1', syllabus: [{ source: 'canvas-file' as const, name: 's.pdf', url: null, pdfBase64: 'AAAA' }] }
+    const payload = { v: 1 as const, kind: 'canvas' as const, at: '', warnings: [], courses: [course] }
+    const out = withoutSyllabusPdfs(payload as never)
+    expect(out.courses[0].syllabus).toEqual([{ source: 'canvas-file', name: 's.pdf', url: null }])
+    expect(course.syllabus[0].pdfBase64).toBe('AAAA') // the original is untouched
+  })
+})
+
+describe('binary fetchers', () => {
+  test('same-origin download returns the bytes and content type', async () => {
+    const fetchMock = vi.fn(async () => new Response(pdfBytes(), { status: 200, headers: { 'Content-Type': 'application/pdf' } }))
+    vi.stubGlobal('fetch', fetchMock)
+    const got = await sameOriginBinaryFetcher()('/files/9/download?verifier=v')
+    expect(got.contentType).toBe('application/pdf')
+    expect(new TextDecoder().decode(got.bytes)).toContain('%PDF')
+    expect(fetchMock).toHaveBeenCalledWith('/files/9/download?verifier=v', { credentials: 'same-origin' })
+  })
+  test('the extension version adds the Canvas origin and sends cookies', async () => {
+    const fetchMock = vi.fn(async () => new Response(pdfBytes(), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    await absoluteBinaryFetcher('https://canvas.cmu.edu')('/files/9/download')
+    expect(fetchMock).toHaveBeenCalledWith('https://canvas.cmu.edu/files/9/download', { credentials: 'include' })
+  })
+  test('refuses anything that is not a Canvas path', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(sameOriginBinaryFetcher()('https://evil.example/x')).rejects.toThrow('Refused')
+    await expect(absoluteBinaryFetcher('https://canvas.cmu.edu')('//evil.example/x')).rejects.toThrow('Refused')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+  test('401 and other errors match the JSON fetchers', async () => {
+    vi.stubGlobal('fetch', async () => new Response('', { status: 401 }))
+    await expect(sameOriginBinaryFetcher()('/files/1/download')).rejects.toBeInstanceOf(CanvasAuthError)
+    vi.stubGlobal('fetch', async () => new Response('', { status: 500 }))
+    await expect(sameOriginBinaryFetcher()('/files/1/download')).rejects.toMatchObject({ status: 500 })
+  })
+})
+
+/** Canvas file metadata as /api/v1/files/:id returns it (only the fields we read). */
+function fileMeta(id: number, name: string, extra: Record<string, unknown> = {}) {
+  return {
+    id,
+    display_name: name,
+    'content-type': 'application/pdf',
+    size: 2000,
+    url: `https://canvas.cmu.edu/files/${id}/download?download_frd=1&verifier=v${id}`,
+    ...extra,
+  }
+}
+
+/**
+ * A fake Canvas for syllabus requests. `pages` maps an exact API path to its answer: a value, or an Error to throw.
+ * Unknown paths answer 404, like a course with no home page.
+ */
+function fakeSyllabusCanvas(pages: Record<string, unknown>) {
+  const calls: string[] = []
+  const fetchPage: PageFetcher = async (path) => {
+    calls.push(path)
+    if (!(path in pages)) throw new CanvasHttpError(404, 'Canvas answered 404')
+    const answer = pages[path]
+    if (answer instanceof Error) throw answer
+    return { data: answer, next: null }
+  }
+  return { fetchPage, calls }
+}
+
+/** A fake file download: maps a path to bytes (or an Error). Records every path. */
+function fakeDownloads(files: Record<string, Uint8Array | Error>) {
+  const calls: string[] = []
+  const fetchBinary: BinaryFetcher = async (path) => {
+    calls.push(path)
+    const got = files[path]
+    if (got === undefined) throw new CanvasHttpError(404, 'Canvas answered 404')
+    if (got instanceof Error) throw got
+    return { contentType: 'application/pdf', bytes: got }
+  }
+  return { fetchBinary, calls }
+}
+
+const COURSE_103 = 'courses/103?include[]=syllabus_body'
+const SEARCH_103 = 'courses/103/files?search_term=syllabus&per_page=20'
+
+describe('collectSyllabus', () => {
+  test('Syllabus page HTML plus the PDF it links (Files tab hidden, no home page)', async () => {
+    const { fetchPage, calls } = fakeSyllabusCanvas({
+      [COURSE_103]: { id: 103, syllabus_body: SYLLABUS_HTML },
+      [SEARCH_103]: new CanvasHttpError(403, 'Canvas answered 403'), // Files tab hidden
+      'files/900': fileMeta(900, 'Stats Fall 2026.pdf'), // link text says "Syllabus", the name does not
+    })
+    const downloads = fakeDownloads({ '/files/900/download?download_frd=1&verifier=v900': pdfBytes() })
+    const problems: string[] = []
+    const docs = await collectSyllabus(fetchPage, downloads.fetchBinary, '103', { left: 10_000_000 }, problems)
+
+    expect(docs).toEqual([
+      {
+        source: 'canvas-syllabus',
+        name: 'Syllabus page',
+        url: 'https://canvas.cmu.edu/courses/103/assignments/syllabus',
+        text: expect.stringContaining('Midterm 1: 20%'),
+      },
+      {
+        source: 'canvas-file',
+        name: 'Stats Fall 2026.pdf',
+        url: 'https://canvas.cmu.edu/courses/103/files/900',
+        pdfBase64: bytesToBase64(pdfBytes()),
+      },
+    ])
+    expect(calls).toEqual([COURSE_103, 'courses/103/front_page', SEARCH_103, 'files/900'])
+    expect(problems).toEqual([]) // 403 and 404 are normal, not problems
+  })
+
+  test('home page link found by file name; files search adds another; non-PDFs and duplicates skipped', async () => {
+    const { fetchPage, calls } = fakeSyllabusCanvas({
+      'courses/101?include[]=syllabus_body': { id: 101, syllabus_body: null },
+      'courses/101/front_page': {
+        title: 'Welcome to Matrices',
+        body: '<p>Grades: see <a href="/courses/101/files/71">here</a>. <a href="/courses/101/files/72">HW 1</a> <a href="/courses/101/files/73">Old</a></p>',
+      },
+      'courses/101/files?search_term=syllabus&per_page=20': [
+        fileMeta(80, 'Syllabus notes.docx', { 'content-type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }),
+        fileMeta(73, 'syllabus-2025.pdf', { locked_for_user: true }), // locked: skipped, and not looked up again
+      ],
+      'files/71': fileMeta(71, 'sylb.pdf'),
+      'files/72': fileMeta(72, 'hw1.pdf'), // linked, but not a syllabus
+    })
+    const downloads = fakeDownloads({ '/files/71/download?download_frd=1&verifier=v71': pdfBytes() })
+    const problems: string[] = []
+    const docs = await collectSyllabus(fetchPage, downloads.fetchBinary, '101', { left: 10_000_000 }, problems)
+
+    expect(docs.map((d) => [d.source, d.name])).toEqual([
+      ['canvas-front-page', 'Welcome to Matrices'],
+      ['canvas-file', 'sylb.pdf'],
+    ])
+    expect(docs[0].text).toBe('Grades: see here. HW 1 Old')
+    expect(calls).not.toContain('files/73')
+    expect(downloads.calls).toEqual(['/files/71/download?download_frd=1&verifier=v71'])
+    expect(problems).toEqual([])
+  })
+
+  test('without a binary fetcher only the HTML pages are read', async () => {
+    const { fetchPage, calls } = fakeSyllabusCanvas({ [COURSE_103]: { syllabus_body: SYLLABUS_HTML } })
+    const docs = await collectSyllabus(fetchPage, null, '103', { left: 10_000_000 }, [])
+    expect(docs.map((d) => d.source)).toEqual(['canvas-syllabus'])
+    expect(calls).toEqual([COURSE_103, 'courses/103/front_page'])
+  })
+
+  test('a PDF over 3 MB is skipped with a reason; a non-PDF answer is skipped silently', async () => {
+    const { fetchPage } = fakeSyllabusCanvas({
+      [COURSE_103]: { syllabus_body: '' },
+      [SEARCH_103]: [fileMeta(1, 'Syllabus big.pdf', { size: 4 * 1024 * 1024 }), fileMeta(2, 'Syllabus.pdf')],
+    })
+    const downloads = fakeDownloads({
+      '/files/2/download?download_frd=1&verifier=v2': new TextEncoder().encode('<html>Log in</html>'),
+    })
+    const problems: string[] = []
+    const docs = await collectSyllabus(fetchPage, downloads.fetchBinary, '103', { left: 10_000_000 }, problems)
+    expect(docs).toEqual([])
+    expect(downloads.calls).toEqual(['/files/2/download?download_frd=1&verifier=v2']) // the big one was never downloaded
+    expect(problems).toEqual(['Syllabus big.pdf is over 3 MB'])
+  })
+
+  test('downloads at most two PDFs and stays inside the shared byte budget', async () => {
+    const files = [fileMeta(1, 'Syllabus A.pdf'), fileMeta(2, 'Syllabus B.pdf'), fileMeta(3, 'Syllabus C.pdf')]
+    const { fetchPage } = fakeSyllabusCanvas({ [COURSE_103]: { syllabus_body: null }, [SEARCH_103]: files })
+    const bytes = pdfBytes('x'.repeat(1991)) // 2000 bytes, matching the size Canvas reported
+    const downloads = fakeDownloads(
+      Object.fromEntries(files.map((f) => [`/files/${f.id}/download?download_frd=1&verifier=v${f.id}`, bytes])),
+    )
+    const many = await collectSyllabus(fetchPage, downloads.fetchBinary, '103', { left: 10_000_000 }, [])
+    expect(many.map((d) => d.name)).toEqual(['Syllabus A.pdf', 'Syllabus B.pdf'])
+
+    const budget = { left: 3000 } // room for one
+    const few = await collectSyllabus(fetchPage, downloads.fetchBinary, '103', budget, [])
+    expect(few.map((d) => d.name)).toEqual(['Syllabus A.pdf'])
+    expect(budget.left).toBe(1000)
+  })
+
+  test('a server error is a problem; a failed download gives its reservation back', async () => {
+    const { fetchPage } = fakeSyllabusCanvas({
+      [COURSE_103]: new CanvasHttpError(500, 'Canvas answered 500'),
+      [SEARCH_103]: [fileMeta(1, 'Syllabus.pdf')],
+    })
+    const downloads = fakeDownloads({ '/files/1/download?download_frd=1&verifier=v1': new TypeError('Failed to fetch') })
+    const budget = { left: 10_000 }
+    const problems: string[] = []
+    expect(await collectSyllabus(fetchPage, downloads.fetchBinary, '103', budget, problems)).toEqual([])
+    expect(problems).toEqual(['Canvas answered 500', 'Failed to fetch'])
+    expect(budget.left).toBe(10_000)
+  })
+})
+
+describe('syncCanvas with syllabi', () => {
+  /** The usual fake Canvas from above, plus syllabus answers for course 103 and a home page for 101. */
+  function fakeWithSyllabi(extra: Record<string, unknown> = {}) {
+    const base = fakeCanvas()
+    const syllabus = fakeSyllabusCanvas({
+      [COURSE_103]: { syllabus_body: SYLLABUS_HTML },
+      'courses/101/front_page': { title: 'Home', body: '<p>Welcome</p>' },
+      'files/900': fileMeta(900, 'Syllabus.pdf'),
+      ...extra,
+    })
+    const calls: string[] = []
+    const fetchPage: PageFetcher = async (path) => {
+      calls.push(path)
+      const isSyllabusPath = /\?include\[\]=syllabus_body$|\/front_page$|\/files\?|^files\//.test(path)
+      return isSyllabusPath ? syllabus.fetchPage(path) : base.fetchPage(path)
+    }
+    return { fetchPage, calls }
+  }
+
+  test('off by default: no syllabus requests at all', async () => {
+    const { fetchPage, calls } = fakeWithSyllabi()
+    const payload = await syncCanvas(fetchPage)
+    expect(calls.some((c) => c.includes('syllabus') || c.includes('front_page'))).toBe(false)
+    expect(payload.courses.every((c) => c.syllabus === undefined)).toBe(true)
+  })
+
+  test('adds syllabus docs to numbered courses only, with progress and no extra warnings', async () => {
+    const { fetchPage, calls } = fakeWithSyllabi()
+    const downloads = fakeDownloads({ '/files/900/download?download_frd=1&verifier=v900': pdfBytes() })
+    const progress: string[] = []
+    const payload = await syncCanvas(fetchPage, (m) => progress.push(m), { syllabus: { fetchBinary: downloads.fetchBinary } })
+
+    const [linear, shell, stats] = payload.courses
+    expect(linear.syllabus?.map((d) => d.source)).toEqual(['canvas-front-page'])
+    expect(shell.syllabus).toBeUndefined() // no course number: not a real class
+    expect(calls.some((c) => c.startsWith('courses/102?'))).toBe(false)
+    expect(stats.syllabus?.map((d) => d.source)).toEqual(['canvas-syllabus', 'canvas-file'])
+    expect(stats.syllabus?.[1].pdfBase64).toBe(bytesToBase64(pdfBytes()))
+    // Only the letter-scale warning from before: 403/404 syllabus pieces are silent.
+    expect(payload.warnings).toEqual([expect.stringContaining('could not read the letter scale')])
+    expect(progress.at(-1)).toBe('Canvas: read 2 of 2 syllabi')
+  })
+
+  test('at most one warning per course, however many pieces fail', async () => {
+    const { fetchPage } = fakeWithSyllabi({
+      [COURSE_103]: new CanvasHttpError(500, 'Canvas answered 500'),
+      'courses/103/front_page': new CanvasHttpError(502, 'Canvas answered 502'),
+    })
+    const payload = await syncCanvas(fetchPage, undefined, { syllabus: { fetchBinary: null } })
+    const syllabusWarnings = payload.warnings.filter((w) => w.includes('syllabus'))
+    expect(syllabusWarnings).toEqual(['Probability and Statistics: could not read the syllabus (Canvas answered 500)'])
+    expect(payload.courses[2].syllabus).toBeUndefined()
+  })
+
+  test('logging out during the syllabus step keeps the grades and stays quiet', async () => {
+    const { fetchPage } = fakeWithSyllabi({ [COURSE_103]: new CanvasAuthError('Log in to Canvas first') })
+    const payload = await syncCanvas(fetchPage, undefined, { syllabus: { fetchBinary: null } })
+    expect(payload.courses).toHaveLength(3)
+    expect(payload.warnings.filter((w) => w.includes('syllabus'))).toEqual([])
+  })
+
+  test('reads at most 8 courses, newest terms first', async () => {
+    const terms = ['Fall 2024', 'Spring 2025', 'Fall 2025', 'Spring 2026', 'Fall 2026']
+    const list = Array.from({ length: 10 }, (_, i) => ({
+      id: 500 + i,
+      name: `Course ${i}`,
+      course_code: `15${String(100 + i)}`,
+      term: { name: terms[i % 5] },
+      enrollments: [{ type: 'student' }],
+    }))
+    const asked: string[] = []
+    const fetchPage: PageFetcher = async (path) => {
+      if (path.startsWith('courses?')) return { data: list, next: null }
+      if (path.includes('/assignment_groups')) return { data: [], next: null }
+      if (path.endsWith('?include[]=syllabus_body')) asked.push(path.split(/[/?]/)[1])
+      throw new CanvasHttpError(404, 'Canvas answered 404')
+    }
+    await syncCanvas(fetchPage, undefined, { syllabus: { fetchBinary: null } })
+    // The two Fall 2024 courses (500, 505) are the oldest and are left out.
+    expect(asked.sort()).toEqual(['501', '502', '503', '504', '506', '507', '508', '509'])
   })
 })

@@ -27,6 +27,7 @@ import {
 } from './lib/extension'
 import { decodePayload, validatePayload } from './lib/payload'
 import { computeQpa } from './lib/qpa'
+import { payloadHasPdfs, pdfsToText } from './lib/syllabus'
 import {
   addManualCourse,
   applyPayload,
@@ -268,7 +269,7 @@ export default function App({ extension = browserExtension }: AppProps) {
   )
 
   /** Saves a sync result and says how it went. */
-  const applySync = useCallback(
+  const saveSync = useCallback(
     (payload: SyncPayload) => {
       const source = SOURCE_NAMES[payload.kind]
       const n = payload.warnings.length
@@ -278,6 +279,24 @@ export default function App({ extension = browserExtension }: AppProps) {
       })
     },
     [replaceWithUndo],
+  )
+
+  /**
+   * Every sync (extension, Sync button, #sync link) comes through here. Syllabus PDFs are turned into text first
+   * (pdf.js, loaded only then), so localStorage never holds a PDF; applyPayload then keeps at most 60 KB of
+   * syllabus text per course. Without PDFs the sync is saved right away.
+   */
+  const applySync = useCallback(
+    (payload: SyncPayload) => {
+      if (!payloadHasPdfs(payload)) {
+        saveSync(payload)
+        return
+      }
+      pdfsToText(payload)
+        .then(saveSync)
+        .catch(() => saveSync(payload)) // never lose the grades over a PDF (applyPayload drops the PDFs)
+    },
+    [saveSync],
   )
 
   /** Tells the student to update an old Sync button (it still works, but may miss fixes). */

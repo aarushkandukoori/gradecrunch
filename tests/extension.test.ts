@@ -1,12 +1,16 @@
 // Tests for the Chrome extension (extension/src). Only made-up data: no real courses or grades.
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
 import { LOGIN_URLS } from '../extension/protocol'
+import manifest from '../extension/manifest.json'
+import welcomeHtml from '../extension/welcome.html?raw'
 import {
   isAllowedOrigin,
   isOffscreenProgress,
   isOffscreenSyncRequest,
   isSourceResultFor,
   parseRequest,
+  PDF_ORIGINS,
+  resultForStorage,
   resultFromError,
 } from '../extension/src/rules'
 import { autolabFetchPage, gradescopeFetchText, runSource, siteUrl } from '../extension/src/sync'
@@ -105,6 +109,36 @@ describe('internal message checks', () => {
     expect(isSourceResultFor({ source: 'canvas', status: 'login', loginUrl: 'https://canvas.cmu.edu/' }, 'canvas')).toBe(true)
     expect(isSourceResultFor({ source: 'canvas', status: 'error' }, 'canvas')).toBe(false)
     expect(isSourceResultFor(undefined, 'canvas')).toBe(false)
+  })
+})
+
+describe('syllabus PDF permission', () => {
+  test('the file-storage host is optional, never a required host permission', () => {
+    expect(manifest.optional_host_permissions).toEqual(PDF_ORIGINS)
+    expect(manifest.optional_host_permissions).toEqual(['https://*.inscloudgate.net/*'])
+    expect(manifest.host_permissions).not.toContain('https://*.inscloudgate.net/*')
+  })
+
+  test('the welcome page has the checkbox, ticked by default', () => {
+    const html = welcomeHtml
+    expect(html).toMatch(/<input id="pdfs" type="checkbox" checked \/>/)
+    expect(html).toContain('Also read syllabus PDFs from Canvas (recommended)')
+  })
+
+  test('resultForStorage drops the PDF bytes and leaves everything else', () => {
+    const doc = { source: 'canvas-file', name: 'Syllabus.pdf', url: null, pdfBase64: 'JVBERg==' }
+    const payload = { v: 1, kind: 'canvas', at: 'x', warnings: [], courses: [{ sourceId: '1', syllabus: [doc] }] }
+    const stored = resultForStorage({ source: 'canvas', status: 'ok', payload })
+    expect(stored).toEqual({
+      source: 'canvas',
+      status: 'ok',
+      payload: { ...payload, courses: [{ sourceId: '1', syllabus: [{ source: 'canvas-file', name: 'Syllabus.pdf', url: null }] }] },
+    })
+    expect(doc.pdfBase64).toBe('JVBERg==') // the result sent to the website keeps them
+    const login = { source: 'canvas' as const, status: 'login' as const, loginUrl: LOGIN_URLS.canvas }
+    expect(resultForStorage(login)).toBe(login)
+    const odd = { source: 'autolab' as const, status: 'ok' as const, payload: 'not an object' }
+    expect(resultForStorage(odd)).toBe(odd)
   })
 })
 
@@ -244,6 +278,44 @@ describe('runSource', () => {
     expect(progress).toContain('Canvas: reading your course list')
   })
 
+  /** A tiny fake Canvas over fetch: one numbered course whose syllabus PDF is in Files. */
+  function stubCanvasWithSyllabus() {
+    const urls: string[] = []
+    vi.stubGlobal('fetch', async (url: string) => {
+      urls.push(url)
+      const json = (data: unknown) => new Response(JSON.stringify(data), { status: 200 })
+      const api = 'https://canvas.cmu.edu/api/v1/'
+      if (url.startsWith(api + 'courses?')) {
+        return json([{ id: 7, name: 'Made-up Course', course_code: '99101', term: { name: 'Fall 2026' }, enrollments: [{ type: 'student' }] }])
+      }
+      if (url.startsWith(api + 'courses/7/assignment_groups')) return json([])
+      if (url === api + 'courses/7?include[]=syllabus_body') return json({ syllabus_body: '<p>Final Exam: 30%</p>' })
+      if (url === api + 'courses/7/files?search_term=syllabus&per_page=20') {
+        return json([{ id: 3, display_name: 'Syllabus.pdf', 'content-type': 'application/pdf', size: 20, url: 'https://canvas.cmu.edu/files/3/download?verifier=q' }])
+      }
+      if (url === 'https://canvas.cmu.edu/files/3/download?verifier=q') return new Response('%PDF-1.4 made up', { status: 200 })
+      return new Response('{}', { status: 404 })
+    })
+    return urls
+  }
+
+  test('Canvas reads syllabi; PDFs only when the permission was granted', async () => {
+    const urls = stubCanvasWithSyllabus()
+    const withPdfs = await runSource('canvas', () => {}, { pdfs: true })
+    expect(withPdfs.status).toBe('ok')
+    const course = (withPdfs as { payload: { courses: { syllabus?: { source: string; text?: string; pdfBase64?: string }[] }[] } }).payload.courses[0]
+    expect(course.syllabus?.map((d) => d.source)).toEqual(['canvas-syllabus', 'canvas-file'])
+    expect(course.syllabus?.[0].text).toBe('Final Exam: 30%')
+    expect(atob(course.syllabus?.[1].pdfBase64 ?? '')).toBe('%PDF-1.4 made up')
+    expect(urls).toContain('https://canvas.cmu.edu/files/3/download?verifier=q')
+
+    urls.length = 0
+    const noPdfs = await runSource('canvas', () => {}) // permission missing: same sync, no file requests
+    const plain = (noPdfs as { payload: { courses: { syllabus?: { source: string }[] }[] } }).payload.courses[0]
+    expect(plain.syllabus?.map((d) => d.source)).toEqual(['canvas-syllabus'])
+    expect(urls.some((u) => u.includes('/files'))).toBe(false)
+  })
+
   test('Autolab redirecting to its sign-in page gives a login result', async () => {
     vi.stubGlobal('fetch', async () =>
       fakeResponse('<html>sign in</html>', { url: 'https://autolab.andrew.cmu.edu/auth/users/sign_in' }),
@@ -291,6 +363,7 @@ const fakeChrome = {
     },
   },
   tabs: { create: vi.fn(async (_props: { url: string }) => ({ id: 99 })) },
+  permissions: { contains: vi.fn(async (_p: { origins?: string[] }) => false) },
   action: { onClicked: fakeEvent() },
   offscreen: { createDocument: vi.fn(async () => {}), closeDocument: vi.fn(async () => {}) },
 }
@@ -411,6 +484,40 @@ describe('background service worker', () => {
     await vi.waitFor(() => expect(fakeChrome.offscreen.closeDocument).toHaveBeenCalledTimes(1))
   })
 
+  test('tells the offscreen page whether it may read syllabus PDFs; the saved copy has no PDF bytes', async () => {
+    stored.consent = true
+    fakeChrome.permissions.contains.mockResolvedValueOnce(true)
+    const doc = { source: 'canvas-file', name: 'Syllabus.pdf', url: null, pdfBase64: 'JVBERg==' }
+    const payload = { v: 1, kind: 'canvas', courses: [{ sourceId: '1', syllabus: [doc] }] }
+    fakeChrome.runtime.sendMessage.mockImplementation(async (message: any) => {
+      if (message.source === 'canvas') return { source: 'canvas', status: 'ok', payload }
+      return { source: message.source, status: 'ok', payload: { v: 1, courses: [] } }
+    })
+    const c = connect('https://gradecrunch.pages.dev')
+    c.request({ type: 'sync', sources: ['canvas', 'gradescope'] })
+    await c.done()
+
+    expect(fakeChrome.permissions.contains).toHaveBeenCalledWith({ origins: ['https://*.inscloudgate.net/*'] })
+    expect(fakeChrome.runtime.sendMessage).toHaveBeenCalledWith({ target: 'offscreen', type: 'sync', source: 'canvas', pdfs: true })
+    expect(fakeChrome.runtime.sendMessage).toHaveBeenCalledWith({ target: 'offscreen', type: 'sync', source: 'gradescope', pdfs: false })
+    expect(c.posted.at(-1).results[0].payload.courses[0].syllabus[0].pdfBase64).toBe('JVBERg==') // the website gets them
+    expect((stored['last:canvas'] as any).result.payload.courses[0].syllabus[0]).toEqual({
+      source: 'canvas-file',
+      name: 'Syllabus.pdf',
+      url: null,
+    })
+  })
+
+  test('without the permission (or if checking fails) PDFs are off', async () => {
+    stored.consent = true
+    fakeChrome.permissions.contains.mockRejectedValueOnce(new Error('no permissions API'))
+    fakeChrome.runtime.sendMessage.mockImplementation(async () => ({ source: 'canvas', status: 'ok', payload: {} }))
+    const c = connect('https://gradecrunch.pages.dev')
+    c.request({ type: 'sync', sources: ['canvas'] })
+    await c.done()
+    expect(fakeChrome.runtime.sendMessage).toHaveBeenCalledWith({ target: 'offscreen', type: 'sync', source: 'canvas', pdfs: false })
+  })
+
   test('ignores progress messages from outside the extension', async () => {
     stored.consent = true
     fakeChrome.runtime.sendMessage.mockImplementation(async () => {
@@ -461,5 +568,88 @@ describe('background service worker', () => {
     expect(fakeChrome.tabs.create).toHaveBeenCalledWith({ url: 'chrome-extension://ext-id/welcome.html' })
     fakeChrome.action.onClicked.listeners[0]()
     expect(fakeChrome.tabs.create).toHaveBeenCalledWith({ url: 'https://grades.aarushkandukoori.com/' })
+  })
+})
+
+// ---------------------------------------------------------------- the welcome page
+
+describe('welcome page', () => {
+  const order: string[] = [] // which chrome calls happened, in order
+  let granted = false
+  const welcomeChrome = {
+    storage: {
+      local: {
+        get: vi.fn(async () => ({})),
+        set: vi.fn(async () => void order.push('consent')),
+      },
+    },
+    permissions: {
+      request: vi.fn(async () => {
+        order.push('request')
+        granted = true
+        return true
+      }),
+      remove: vi.fn(async () => {
+        order.push('remove')
+        granted = false
+        return true
+      }),
+      contains: vi.fn(async () => granted),
+    },
+    tabs: { update: vi.fn(async () => undefined), getCurrent: vi.fn(async () => ({ id: 5 })), remove: vi.fn(async () => {}) },
+  }
+
+  beforeAll(async () => {
+    document.body.innerHTML =
+      '<input id="pdfs" type="checkbox" checked /><button id="continue" type="button">Continue</button><p id="status"></p>'
+    window.history.replaceState(null, '', '/welcome.html?tab=12')
+    vi.stubGlobal('chrome', welcomeChrome)
+    await import('../extension/src/welcome')
+  })
+  beforeEach(() => {
+    vi.stubGlobal('chrome', welcomeChrome)
+    order.length = 0
+    ;(document.getElementById('continue') as HTMLButtonElement).disabled = false
+  })
+
+  test('Continue asks for the PDF permission during the click, before anything else', async () => {
+    const button = document.getElementById('continue') as HTMLButtonElement
+    button.click()
+    // Called synchronously inside the click handler: Chrome only shows the prompt during a user gesture.
+    expect(welcomeChrome.permissions.request).toHaveBeenCalledWith({ origins: ['https://*.inscloudgate.net/*'] })
+    await vi.waitFor(() => expect(welcomeChrome.tabs.update).toHaveBeenCalledWith(12, { active: true }))
+    expect(order).toEqual(['request', 'consent'])
+  })
+
+  test('unticking the box removes the permission and still saves consent', async () => {
+    welcomeChrome.tabs.update.mockClear()
+    ;(document.getElementById('pdfs') as HTMLInputElement).checked = false
+    ;(document.getElementById('continue') as HTMLButtonElement).click()
+    await vi.waitFor(() => expect(welcomeChrome.tabs.update).toHaveBeenCalled())
+    expect(order).toEqual(['remove', 'consent'])
+  })
+
+  test('consent is saved while Chrome\'s prompt is still open, and the page waits for the answer', async () => {
+    welcomeChrome.tabs.update.mockClear()
+    let answer: (v: boolean) => void = () => {}
+    welcomeChrome.permissions.request.mockImplementationOnce(() => {
+      order.push('request')
+      return new Promise<boolean>((resolve) => (answer = resolve))
+    })
+    ;(document.getElementById('pdfs') as HTMLInputElement).checked = true
+    ;(document.getElementById('continue') as HTMLButtonElement).click()
+    await vi.waitFor(() => expect(order).toEqual(['request', 'consent']))
+    expect(welcomeChrome.tabs.update).not.toHaveBeenCalled() // still on the welcome page while the prompt is open
+    answer(true)
+    await vi.waitFor(() => expect(welcomeChrome.tabs.update).toHaveBeenCalledWith(12, { active: true }))
+  })
+
+  test('saying no in Chrome\'s prompt still finishes the welcome page', async () => {
+    welcomeChrome.tabs.update.mockClear()
+    welcomeChrome.permissions.request.mockRejectedValueOnce(new Error('denied'))
+    ;(document.getElementById('pdfs') as HTMLInputElement).checked = true
+    ;(document.getElementById('continue') as HTMLButtonElement).click()
+    await vi.waitFor(() => expect(welcomeChrome.tabs.update).toHaveBeenCalled())
+    expect(order).toEqual(['consent'])
   })
 })

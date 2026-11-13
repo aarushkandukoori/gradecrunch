@@ -381,6 +381,25 @@ describe('applyPayload', () => {
     const next = applyPayload(s, payload('canvas', [syncedCanvas('1', { term: 'fall 2026' })]))
     expect(Object.keys(next.synced)).toEqual(['canvas:1']) // course 2 was dropped this term
   })
+
+  test('syllabus documents are saved as text only, at most 60 KB per course (never a PDF)', () => {
+    const s = applyPayload(
+      defaultStore(),
+      payload('canvas', [
+        syncedCanvas('1', {
+          syllabus: [
+            { source: 'canvas-front-page', name: 'Home page', url: null, text: 'z'.repeat(150_000) },
+            { source: 'canvas-syllabus', name: 'Syllabus page', url: null, text: 'Grading\nHomework 50%\nExams 50%' },
+            { source: 'canvas-file', name: 'syllabus.pdf', url: null, pdfBase64: 'JVBERi0xLjQK' },
+          ],
+        }),
+      ]),
+    )
+    const docs = s.synced['canvas:1'].syllabus ?? []
+    expect(docs.map((d) => d.name)).toEqual(['Home page', 'Syllabus page'])
+    expect(docs.reduce((t, d) => t + (d.text?.length ?? 0), 0)).toBeLessThanOrEqual(60_000)
+    expect(JSON.stringify(s)).not.toContain('pdfBase64')
+  })
 })
 
 describe('manual courses', () => {
@@ -741,6 +760,30 @@ describe('buildClaudePrompt', () => {
     expect(text).not.toMatch(/https?:/)
     expect(text).not.toContain('12345')
     expect(text).not.toContain('Fall 2026|21241')
+  })
+
+  test('gives Claude what it needs to recalculate the QPA when I say a class is pass/fail', () => {
+    const a = course({ key: 'Fall 2026|21241' })
+    const b = course({ key: 'Fall 2026|85150', number: '85150', title: 'Made-up Psych', units: 9, prefs: { passFail: true } })
+    const qpa: QpaResult = {
+      rows: [
+        { courseKey: a.key, label: '21-241', units: 11, letter: 'B', points: 3, factorable: true, reason: null },
+        { courseKey: b.key, label: '85-150', units: 9, letter: 'A', points: 4, factorable: false, reason: 'Pass/fail' },
+      ],
+      semesterQpa: 3,
+      factorableUnits: 11,
+      totalUnits: 20,
+      qualityPoints: 33,
+      cumulativeQpa: 3.38,
+      deansList: null,
+    }
+    const text = buildClaudePrompt([a, b], new Map(), new Map(), qpa, settings)
+    expect(text).toContain("If I tell you I'm taking a class pass/fail, leave it out of the QPA")
+    expect(text).toContain('recalculate my semester QPA (and cumulative QPA, if given)')
+    expect(text).toContain('My cumulative QPA before this semester: 3.40 from 90 factorable units')
+    expect(text).toContain('Counts toward QPA: yes (B = 3 grade points x 11 units)')
+    expect(text).toContain('Taken pass/fail')
+    expect(text).toContain('Counts toward QPA: no (Pass/fail)')
   })
 })
 

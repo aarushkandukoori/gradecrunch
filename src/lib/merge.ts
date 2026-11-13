@@ -7,8 +7,10 @@
 //  3. match Gradescope items onto Canvas items by name; add the rest as new items
 //  4. Gradescope-only courses get categories guessed from item names
 //  5. guess unknown max points from similar items
+//  5b. grading weights from the syllabus, when we can read them (see syllabus.ts)
 //  6. add hand-made courses
 //  7. apply the student's prefs (weights, moves, planned items, units, cutoffs)
+//     Weights, per category: the student's own > the syllabus's (when confidently read) > Canvas's group weights.
 //  8. pick a title
 //  9. sort
 import type {
@@ -21,6 +23,7 @@ import type {
   ItemStatus,
   ManualCourse,
   Store,
+  SyllabusDoc,
   SyncedCourse,
   SyncedItem,
 } from '../types'
@@ -28,6 +31,7 @@ import { lookupCourse } from './catalog'
 import { bestCategoryMatch, inferCategory, normalizeName } from './categorize'
 import { DEFAULT_SCHEME_GRAD, DEFAULT_SCHEME_UNDERGRAD } from './cmu'
 import { canonicalTerm, parseCourseNumbers, termSortKey } from './courseNumber'
+import { matchDrop, matchWeights, moveTargets, pickSyllabus, type CategoryRef } from './syllabus'
 
 // termSortKey lives in courseNumber.ts (so the payload validator can use it without this file); re-exported
 // here because the UI and tests have always imported it from merge.
@@ -311,11 +315,22 @@ function addGradescope(course: SyncedCourse, categories: Category[], items: Item
       target.status = 'graded'
       target.source = source
     } else if (target.score !== null && gsScore !== null) {
-      // Both have a score: keep the first one (Canvas), but show the other site's if they disagree.
+      // Both have a score and they disagree. Gradescope is where these assignments are graded, and the copy on
+      // Canvas lags behind regrades, so Gradescope's score wins and Canvas's is shown next to it. Two exceptions
+      // keep the Canvas score: Autolab (its Canvas copy often has late penalties applied by hand) and a different
+      // max on Canvas (the instructor rescaled or curved it there on purpose).
       const other = scaledScore(gsScore, gsMax, target)
       if (Math.abs(other - target.score) > 0.001) {
-        target.otherScore = other
-        target.otherSource = source
+        const sameScale = gsMax === null || target.max === null || sameMax(gsMax, target.max)
+        if (source === 'gradescope' && fromCanvas(target) && target.source === 'canvas' && sameScale) {
+          target.otherScore = target.score
+          target.otherSource = 'canvas'
+          target.score = other
+          target.source = 'gradescope'
+        } else {
+          target.otherScore = other
+          target.otherSource = source
+        }
       }
     } else if (target.score === null && target.status === 'unsubmitted' && (si.status === 'submitted' || si.status === 'ungraded')) {
       // Neither has a score, but Gradescope knows it was turned in (or the paper exam happened).
@@ -459,6 +474,8 @@ interface Draft {
   canvasGrade: string | null
   canvasScheme: GradeCut[] | null
   manualPercent: number | null
+  weightNote: string | null
+  syllabusUsed: { name: string; url: string | null } | null
 }
 
 /** Step 7: the student's fixes win over synced data. */
@@ -502,10 +519,19 @@ function applyPrefs(d: Draft, savedPrefs: CoursePrefs, store: Store): Course {
   estimateMissingMax(items)
   markAlternateExams(items, new Set(Array.isArray(prefs.included) ? prefs.included : []))
 
-  // Weights: a pref replaces the synced weight. In total-points mode weights do not apply, so they are null.
-  // (Done last so categories created above for planned items get their saved weight too.)
+  // Weights: a pref replaces the synced weight (syllabus or Canvas). In total-points mode weights do not apply, so
+  // they are null. (Done last so categories created above for planned items get their saved weight too.)
   for (const c of categories) {
-    c.weight = weighted ? (num(weights[c.key]) ?? c.weight) : null
+    const mine = num(weights[c.key])
+    if (!weighted) {
+      c.weight = null
+      delete c.weightSource
+    } else if (mine !== null) {
+      c.weight = mine
+      c.weightSource = 'you'
+    } else if (c.weight !== null) {
+      c.weightSource = c.weightSource ?? 'canvas'
+    }
   }
 
   // Units: student's number, else the catalog, else 9 (and the UI says "check SIO").
@@ -556,6 +582,9 @@ function applyPrefs(d: Draft, savedPrefs: CoursePrefs, store: Store): Course {
     unitsSource,
     manualPercent: d.manualPercent,
     prefs,
+    // Notes about syllabus weights only matter while weights are on.
+    weightNote: weighted ? d.weightNote : null,
+    syllabusUsed: weighted ? d.syllabusUsed : null,
   }
 }
 
@@ -583,6 +612,66 @@ function weightShell(canvas: SyncedCourse[]): SyncedCourse | null {
   return best
 }
 
+/** The two notes the class page shows about where the weights came from. */
+export const NOTE_CANVAS_UNWEIGHTED = "Using syllabus weights; Canvas isn't weighted"
+export const NOTE_CANVAS_DIFFERENT = "Canvas's weights don't match the syllabus; using the syllabus"
+
+/**
+ * Step 5b: when a syllabus document has grading weights we can read with confidence, they replace Canvas's.
+ *  - every category gets the syllabus weight it matches (0 when the syllabus doesn't mention it),
+ *  - syllabus parts with no category (e.g. "Final Exam 30%" before Canvas has that group) become empty planned
+ *    categories, so "what do I need" plans for them,
+ *  - items sitting in an unweighted catch-all group move to the category of their kind,
+ *  - simple drop rules ("lowest homework is dropped") apply where Canvas has none.
+ * Returns the note and the document used, or null when no syllabus could be used (Canvas weights stay).
+ */
+function applySyllabus(
+  canvas: SyncedCourse[],
+  categories: Category[],
+  items: Item[],
+  canvasWeighted: boolean,
+): { note: string | null; doc: SyllabusDoc } | null {
+  const docs = canvas.flatMap((c) => list(c.syllabus)).filter((d) => d && typeof d === 'object')
+  const found = pickSyllabus(docs)
+  if (!found) return null
+
+  // `size` (items worth points) lets matching prefer the group that really holds the work.
+  const refs = (): CategoryRef[] =>
+    categories.map((c) => ({
+      key: c.key,
+      name: c.name,
+      weight: c.weight,
+      size: items.filter((i) => i.categoryKey === c.key && (i.score !== null || (i.max ?? 0) > 0)).length,
+    }))
+  const plan = matchWeights(found.weights.items, refs())
+  const canvasWeights = new Map(categories.map((c) => [c.key, c.weight ?? 0]))
+
+  for (const c of categories) {
+    c.weight = plan.weights[c.key] ?? 0
+    c.weightSource = 'syllabus'
+  }
+  for (const a of plan.added) {
+    categories.push({ key: a.key, name: a.name, weight: a.weight, weightSource: 'syllabus', dropLowest: 0, dropHighest: 0, neverDrop: [] })
+  }
+
+  const weightNow: Record<string, number> = {}
+  for (const c of categories) weightNow[c.key] = c.weight ?? 0
+  const moves = moveTargets(items, refs(), weightNow)
+  for (const i of items) if (moves[i.key]) i.categoryKey = moves[i.key]
+
+  for (const d of found.weights.drops) {
+    const key = matchDrop(d.label, refs())
+    const cat = categories.find((c) => c.key === key)
+    if (cat && cat.dropLowest === 0) cat.dropLowest = d.dropLowest // Canvas's own drop rule, when set, wins
+  }
+
+  const differs =
+    plan.added.some((a) => a.weight > 0) ||
+    [...canvasWeights].some(([key, before]) => Math.abs(before - (plan.weights[key] ?? 0)) > 0.01)
+  const note = !canvasWeighted ? NOTE_CANVAS_UNWEIGHTED : differs ? NOTE_CANVAS_DIFFERENT : null
+  return { note, doc: found.doc }
+}
+
 /** Steps 2-5 and 8 for one group of synced courses. */
 function draftFromGroup(g: Group): Draft {
   const categories: Category[] = []
@@ -595,6 +684,7 @@ function draftFromGroup(g: Group): Draft {
   for (const c of canvas) addCanvas(c, categories, items, c === weightsFrom)
   for (const c of gradescope) addGradescope(c, categories, items)
   for (const c of autolab) addGradescope(c, categories, items)
+  const syllabus = applySyllabus(canvas, categories, items, weightsFrom !== null)
 
   const alsoNumbers: string[] = []
   for (const m of g.members) {
@@ -613,13 +703,15 @@ function draftFromGroup(g: Group): Draft {
     term: g.term,
     academic: g.number !== null,
     sources: g.members.map((m) => ({ source: m.source, sourceId: m.sourceId, url: m.url, syncedAt: m.syncedAt })),
-    weighted: weightsFrom !== null,
+    weighted: weightsFrom !== null || syllabus !== null,
     categories,
     items,
     canvasScore: scored ? scored.canvasScore : null,
     canvasGrade: scored ? scored.canvasGrade : (canvas.find((c) => c.canvasGrade)?.canvasGrade ?? null),
     canvasScheme: withScheme,
     manualPercent: null,
+    weightNote: syllabus ? syllabus.note : null,
+    syllabusUsed: syllabus ? { name: str(syllabus.doc.name) || 'Syllabus', url: str(syllabus.doc.url) || null } : null,
   }
 }
 
@@ -646,6 +738,8 @@ function draftFromManual(m: ManualCourse): Draft | null {
     canvasGrade: null,
     canvasScheme: null,
     manualPercent: num(m.percent),
+    weightNote: null,
+    syllabusUsed: null,
   }
 }
 

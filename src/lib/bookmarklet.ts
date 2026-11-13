@@ -6,6 +6,7 @@ import { BOOKMARKLET_CODE } from '../generated/bookmarklet'
 export { BOOKMARKLET_VERSION } from '../../bookmarklet/version'
 export {
   isGradeSiteOrigin,
+  MAX_MESSAGE_CHARS,
   MSG_DONE,
   MSG_READY,
   MSG_SYNC,

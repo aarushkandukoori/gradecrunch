@@ -4,7 +4,18 @@ import { beforeAll, describe, expect, test } from 'vitest'
 import { loadCatalog, lookupCourse } from '../src/lib/catalog'
 import { bestCategoryMatch, inferCategory, normalizeName } from '../src/lib/categorize'
 import { DEFAULT_SCHEME_GRAD, DEFAULT_SCHEME_UNDERGRAD } from '../src/lib/cmu'
-import { buildCourses, canonicalTerm, median, rekeyPrefs, stripNumberPrefix, termSortKey, termsOf } from '../src/lib/merge'
+import { gradeCourse } from '../src/lib/grade'
+import {
+  buildCourses,
+  canonicalTerm,
+  median,
+  NOTE_CANVAS_DIFFERENT,
+  NOTE_CANVAS_UNWEIGHTED,
+  rekeyPrefs,
+  stripNumberPrefix,
+  termSortKey,
+  termsOf,
+} from '../src/lib/merge'
 import type { Course, CoursePrefs, ManualCourse, Settings, Store, SyncedCategory, SyncedCourse, SyncedItem } from '../src/types'
 
 // ---------------------------------------------------------------- builders for synthetic data
@@ -326,7 +337,15 @@ describe('buildCourses: Canvas categories and items', () => {
   test('keys, weights, drops and fields', () => {
     const c = only(buildCourses(store([course])))
     expect(c.weighted).toBe(true)
-    expect(c.categories[0]).toEqual({ key: 'c:100:g1', name: 'Quizzes', weight: 10, dropLowest: 1, dropHighest: 0, neverDrop: ['c:a3'] })
+    expect(c.categories[0]).toEqual({
+      key: 'c:100:g1',
+      name: 'Quizzes',
+      weight: 10,
+      weightSource: 'canvas',
+      dropLowest: 1,
+      dropHighest: 0,
+      neverDrop: ['c:a3'],
+    })
     expect(c.categories[1].key).toBe('c:100:g2')
     expect(itemNamed(c, 'Quiz 1')).toEqual({
       key: 'c:a1',
@@ -392,7 +411,7 @@ describe('buildCourses: Gradescope merging', () => {
     expect(hw.otherScore).toBeNull()
   })
 
-  test('matched item: both scored and different -> keep Canvas, remember Gradescope', () => {
+  test('matched item: both scored and different -> Gradescope wins, Canvas kept as the other score', () => {
     const c = only(
       buildCourses(
         store([
@@ -401,10 +420,26 @@ describe('buildCourses: Gradescope merging', () => {
         ]),
       ),
     )
+    // Gradescope is where it was graded; the Canvas copy lags behind regrades.
     const q = only([c]).items[0]
-    expect(q.score).toBe(8)
-    expect(q.source).toBe('canvas')
-    expect(q.otherScore).toBe(9)
+    expect(q.key).toBe('c:a1') // still the Canvas item (prefs keep working)
+    expect(q.score).toBe(9)
+    expect(q.source).toBe('gradescope')
+    expect(q.otherScore).toBe(8)
+    expect(q.otherSource).toBe('canvas')
+  })
+
+  test('matched item: both scored, Canvas rescaled to another max -> Canvas wins (a deliberate curve)', () => {
+    const c = only(
+      buildCourses(
+        store([
+          canvas('100', { categories: [cat('g1', 'Exams', 50)], items: [item('a1', 'Midterm 2', 'g1', 85, 100)] }),
+          gs('900', { items: [item('5001', 'Midterm 2', null, 48, 60)] }),
+        ]),
+      ),
+    )
+    expect(c.items[0]).toMatchObject({ score: 85, source: 'canvas', otherSource: 'gradescope' })
+    expect(c.items[0].otherScore).toBeCloseTo(80)
   })
 
   test('matched item: equal scores leave otherScore null', () => {
@@ -1150,5 +1185,168 @@ describe('item keys survive Canvas posting a matching column', () => {
     // Nothing to rename: the same object comes back.
     const p = { units: 9 }
     expect(rekeyPrefs(p, [])).toBe(p)
+  })
+})
+
+// ---------------------------------------------------------------- syllabus weights (made-up syllabus texts)
+
+/** A made-up Syllabus page in the shape of a stats course: Canvas itself is in points mode. */
+const STATS_SYLLABUS = [
+  'Grading',
+  'Average Homework Score: 15%',
+  'Average Quiz Score: 15%',
+  'Midterm 1: 20%',
+  'Midterm 2: 20%',
+  'Final Exam: 30%',
+  'The lowest homework score will be dropped.',
+  'A: 90% - 100%',
+  'Late homework loses 10% per day.',
+].join('\n')
+
+function statsCourse(extra: Partial<SyncedCourse> = {}): SyncedCourse {
+  return canvas('225', {
+    number: '36225',
+    weighted: false,
+    canvasScore: 80,
+    categories: [
+      cat('hw', 'Homework', 0),
+      cat('qz', 'Quizzes', 0),
+      cat('m1', 'Midterm 1', 0),
+      cat('e2', 'Exam 2', 0),
+      cat('rec', 'Recitation', 0),
+      cat('lec', 'Lecture', 0),
+    ],
+    items: [
+      item('h1', 'HW 1', 'hw', 9, 10),
+      item('h2', 'HW 2', 'hw', 4, 10),
+      item('q1', 'Quiz 1', 'qz', 5, 10),
+      item('x1', 'Midterm 1', 'm1', 45, 50),
+      item('x2', 'Exam 2', 'e2', 40, 50),
+      item('r1', 'Recitation 1', 'rec', null, 0),
+      item('l1', 'Lecture 1', 'lec', null, 0),
+    ],
+    syllabus: [{ source: 'canvas-syllabus', name: 'Syllabus page', url: 'https://canvas.cmu.edu/courses/225/assignments/syllabus', text: STATS_SYLLABUS }],
+    ...extra,
+  })
+}
+
+function weightsByName(c: Course): Record<string, [number | null, string | undefined]> {
+  return Object.fromEntries(c.categories.map((k) => [k.name, [k.weight, k.weightSource]]))
+}
+
+describe('syllabus weights', () => {
+  test('Canvas not weighted: syllabus weights apply, "Midterm 2" fills "Exam 2", the Final becomes a planned category', () => {
+    const c = only(buildCourses(store([statsCourse()])))
+    expect(c.weighted).toBe(true)
+    expect(weightsByName(c)).toEqual({
+      Homework: [15, 'syllabus'],
+      Quizzes: [15, 'syllabus'],
+      'Midterm 1': [20, 'syllabus'],
+      'Exam 2': [20, 'syllabus'],
+      Recitation: [0, 'syllabus'], // not in the syllabus: visible, counts 0
+      Lecture: [0, 'syllabus'],
+      'Final Exam': [30, 'syllabus'],
+    })
+    expect(c.categories.find((k) => k.name === 'Final Exam')?.key).toBe('s:finalexam')
+    expect(c.weightNote).toBe(NOTE_CANVAS_UNWEIGHTED)
+    expect(c.syllabusUsed).toEqual({ name: 'Syllabus page', url: 'https://canvas.cmu.edu/courses/225/assignments/syllabus' })
+    // "The lowest homework score will be dropped" (Canvas had no drop rule).
+    expect(c.categories.find((k) => k.name === 'Homework')?.dropLowest).toBe(1)
+    // HW 90% (HW 2 dropped), quiz 50%, midterm 1 90%, exam 2 80%: (13.5 + 7.5 + 18 + 16) / 70 = 78.57%.
+    expect(gradeCourse(c).percent).toBeCloseTo(78.571, 2)
+  })
+
+  test("the student's own weights beat the syllabus; turning weights off beats both", () => {
+    const mine = only(buildCourses(store([statsCourse()], { prefs: { 'Fall 2026|36225': { weights: { 'c:225:hw': 25 } } } })))
+    expect(weightsByName(mine).Homework).toEqual([25, 'you'])
+    expect(weightsByName(mine).Quizzes).toEqual([15, 'syllabus'])
+
+    const off = only(buildCourses(store([statsCourse()], { prefs: { 'Fall 2026|36225': { weighted: false } } })))
+    expect(off.weighted).toBe(false)
+    expect(off.categories.every((k) => k.weight === null && k.weightSource === undefined)).toBe(true)
+    expect(off.weightNote).toBeNull()
+    expect(off.syllabusUsed).toBeNull()
+  })
+
+  test('Canvas weighted wrongly (one catch-all group): syllabus PDF weights win and items move to their categories', () => {
+    const pdfText = [
+      'Course Requirements and Grading',
+      'Workbooks 25%',
+      'Attendance & Participation 10%',
+      'Midterm Exam 25%',
+      'Final Exam 40%',
+      'Grading Scale',
+      'A 93% and above',
+    ].join('\n')
+    const c = only(
+      buildCourses(
+        store([
+          canvas('170', {
+            number: '85170',
+            weighted: true,
+            categories: [cat('a', 'Assignments', 25), cat('i', 'Imported Assignments', 0)],
+            items: [
+              item('w1', 'Workbook 1', 'a', 8, 10),
+              item('w2', 'Workbook 2', 'a', 9, 10),
+              item('at', 'Attendance', 'a', 1, 1),
+              item('mt', 'Midterm', 'a', 80, 100),
+            ],
+            syllabus: [{ source: 'canvas-file', name: 'syllabus.pdf', url: null, text: pdfText }],
+          }),
+        ]),
+      ),
+    )
+    expect(c.weightNote).toBe(NOTE_CANVAS_DIFFERENT)
+    expect(weightsByName(c)).toMatchObject({
+      Assignments: [0, 'syllabus'],
+      Workbooks: [25, 'syllabus'],
+      'Attendance & Participation': [10, 'syllabus'],
+      'Midterm Exam': [25, 'syllabus'],
+      'Final Exam': [40, 'syllabus'],
+    })
+    expect(itemNamed(c, 'Workbook 1').categoryKey).toBe('s:workbooks')
+    expect(itemNamed(c, 'Attendance').categoryKey).toBe('s:attendanceparticipation')
+    expect(itemNamed(c, 'Midterm').categoryKey).toBe('s:midtermexam')
+    // Workbooks 85%, attendance 100%, midterm 80%: (21.25 + 10 + 20) / 60 = 85.42%.
+    expect(gradeCourse(c).percent).toBeCloseTo(85.417, 2)
+  })
+
+  test('Canvas weighted the same as the syllabus: no note', () => {
+    const c = only(
+      buildCourses(
+        store([
+          canvas('241', {
+            categories: [cat('h', 'Homework', 40), cat('e', 'Exams', 60)],
+            items: [item('1', 'HW 1', 'h', 8, 10)],
+            syllabus: [{ source: 'canvas-file', name: 'sylb.pdf', url: null, text: 'Grading\nHomework 40%\nExams 60%' }],
+          }),
+        ]),
+      ),
+    )
+    expect(c.weightNote).toBeNull()
+    expect(c.syllabusUsed?.name).toBe('sylb.pdf')
+    expect(weightsByName(c)).toEqual({ Homework: [40, 'syllabus'], Exams: [60, 'syllabus'] })
+  })
+
+  test('a syllabus whose weights we cannot trust leaves the Canvas weights alone', () => {
+    const c = only(
+      buildCourses(
+        store([
+          canvas('241', {
+            categories: [cat('h', 'Homework', 40), cat('e', 'Exams', 60)],
+            syllabus: [{ source: 'canvas-syllabus', name: 'Syllabus page', url: null, text: 'Grading\nHomework 30%\nExams 30%' }],
+          }),
+        ]),
+      ),
+    )
+    expect(weightsByName(c)).toEqual({ Homework: [40, 'canvas'], Exams: [60, 'canvas'] })
+    expect(c.weightNote).toBeNull()
+    expect(c.syllabusUsed).toBeNull()
+  })
+
+  test('no syllabus and Canvas unweighted: total points, as before', () => {
+    const c = only(buildCourses(store([statsCourse({ syllabus: undefined })])))
+    expect(c.weighted).toBe(false)
+    expect(c.categories.every((k) => k.weight === null)).toBe(true)
   })
 })

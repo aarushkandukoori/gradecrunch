@@ -4,7 +4,7 @@
 //         "j" + base64url(UTF-8 JSON)  as a fallback
 // The decoder never trusts its input: anyone can craft a #sync= link, so validatePayload rebuilds
 // a clean SyncPayload field by field and throws away anything unexpected.
-import type { GradeCut, ItemStatus, SyncedCategory, SyncedCourse, SyncedItem, SyncPayload } from '../types'
+import type { GradeCut, ItemStatus, SyllabusDoc, SyncedCategory, SyncedCourse, SyncedItem, SyncPayload } from '../types'
 import { AUTOLAB_ORIGIN, CANVAS_ORIGIN, GRADESCOPE_ORIGIN } from './brand'
 import { termSortKey } from './courseNumber'
 
@@ -19,6 +19,10 @@ const MAX_FAILED_IDS = 100
 const MAX_NAME = 300
 const MAX_WARNINGS = 50
 const MAX_DECODED_BYTES = 10_000_000 // stops "gzip bombs" (tiny input that inflates to gigabytes)
+const MAX_SYLLABUS_DOCS = 5 // per course: syllabus page, home page and a few syllabus files
+const MAX_SYLLABUS_TEXT = 200_000 // characters of text per document (the app keeps at most 60 KB per course)
+const MAX_PDF_BASE64 = 4 * 1024 * 1024 // characters of base64 per PDF (about 3 MB of PDF)
+const SYLLABUS_SOURCES: SyllabusDoc['source'][] = ['canvas-syllabus', 'canvas-front-page', 'canvas-file']
 
 const STATUSES: ItemStatus[] = ['graded', 'submitted', 'ungraded', 'missing', 'unsubmitted', 'excused']
 const ALLOWED_HOSTS = [new URL(CANVAS_ORIGIN).host, new URL(GRADESCOPE_ORIGIN).host, new URL(AUTOLAB_ORIGIN).host]
@@ -185,6 +189,9 @@ function cleanCourse(c: unknown, kind: SyncPayload['kind'], at: string, itemBudg
   const rawScheme = arr(c.scheme)
   if (rawScheme.length > MAX_CUTS) warnings.push(`${label}: only the first ${MAX_CUTS} rows of the letter scheme were kept.`)
 
+  // Syllabus documents come only from Canvas (that's where the Syllabus page and Files live).
+  const syllabus = kind === 'canvas' ? cleanSyllabus(c.syllabus, label, warnings) : []
+
   return {
     source: kind, // the payload's kind decides the source, whatever the course claims
     sourceId,
@@ -203,7 +210,37 @@ function cleanCourse(c: unknown, kind: SyncPayload['kind'], at: string, itemBudg
     canvasGrade: str(c.canvasGrade, 10),
     scheme: cleanScheme(c.scheme),
     syncedAt: str(c.syncedAt, 40) ?? at,
+    ...(syllabus.length > 0 ? { syllabus } : {}),
   }
+}
+
+/**
+ * Clean syllabus documents: at most 5, text cut to 200 KB, a PDF only if it is plain base64 under 4 MB. A document
+ * with neither text nor a usable PDF is dropped.
+ */
+function cleanSyllabus(x: unknown, label: string, warnings: string[]): SyllabusDoc[] {
+  const raw = arr(x)
+  if (raw.length > MAX_SYLLABUS_DOCS) warnings.push(`${label}: only the first ${MAX_SYLLABUS_DOCS} syllabus documents were kept.`)
+  const docs: SyllabusDoc[] = []
+  for (const d of raw.slice(0, MAX_SYLLABUS_DOCS)) {
+    if (!isObject(d) || !SYLLABUS_SOURCES.includes(d.source as SyllabusDoc['source'])) continue
+    const name = str(d.name, MAX_NAME) ?? 'Syllabus'
+    const text = str(d.text, MAX_SYLLABUS_TEXT)
+    let pdfBase64: string | null = null
+    if (typeof d.pdfBase64 === 'string' && d.pdfBase64 !== '') {
+      if (d.pdfBase64.length > MAX_PDF_BASE64) warnings.push(`${label}: the syllabus file ${name} is too big to read.`)
+      else if (/^[A-Za-z0-9+/]*={0,2}$/.test(d.pdfBase64)) pdfBase64 = d.pdfBase64
+    }
+    if (!text && !pdfBase64) continue
+    docs.push({
+      source: d.source as SyllabusDoc['source'],
+      name,
+      url: safeUrl(d.url),
+      ...(text ? { text } : {}),
+      ...(pdfBase64 ? { pdfBase64 } : {}),
+    })
+  }
+  return docs
 }
 
 /** One clean category. Drop counts are capped at how many items it has (more would only slow the grade math). */

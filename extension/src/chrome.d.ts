@@ -64,6 +64,17 @@ declare namespace chrome {
     function getCurrent(): Promise<Tab | undefined>
   }
 
+  namespace permissions {
+    /** Optional host permissions, e.g. { origins: ["https://*.inscloudgate.net/*"] }. */
+    interface Permissions {
+      origins?: string[]
+    }
+    /** Shows Chrome's permission prompt. Only works during a click (a "user gesture"). */
+    function request(permissions: Permissions): Promise<boolean>
+    function contains(permissions: Permissions): Promise<boolean>
+    function remove(permissions: Permissions): Promise<boolean>
+  }
+
   namespace action {
     const onClicked: ChromeEvent<() => void>
   }

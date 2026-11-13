@@ -23,6 +23,11 @@
         <b>autolab.andrew.cmu.edu</b>. It uses the login you already have in this browser. It never sees or asks for your
         password, and it only reads these pages when the GradeCrunch site asks it to sync.
       </p>
+      <p>
+        It also reads each class's syllabus on Canvas (the Syllabus page, the home page and syllabus PDFs), because the
+        real grading weights are often only written there. Canvas stores PDFs on <b>inscloudgate.net</b>, so reading
+        them needs one more permission, which Chrome asks for when you click Continue.
+      </p>
 
       <h2>Where it goes</h2>
       <p>
@@ -42,6 +47,11 @@
         Right-click the GradeCrunch icon in the toolbar and choose <b>Remove from Chrome</b>, or open
         <b>chrome://extensions</b> and click <b>Remove</b>. That deletes everything the extension stored.
       </p>
+
+      <label class="check">
+        <input id="pdfs" type="checkbox" checked />
+        <span>Also read syllabus PDFs from Canvas (recommended)</span>
+      </label>
 
       <button id="continue" type="button">Continue</button>
       <p id="status" class="status" role="status"></p>

@@ -6,6 +6,7 @@
 // state updates stay one-liners in the components and are easy to test.
 import { APP_SLUG } from './brand'
 import { canonicalTerm } from './courseNumber'
+import { capSyllabusText } from './syllabus'
 import type { CoursePrefs, GradeCut, ManualCourse, ManualItem, Settings, Store, SyncedCourse, SyncPayload } from '../types'
 
 export const STORE_KEY = `${APP_SLUG}:v1`
@@ -191,8 +192,10 @@ export function exportStoreJson(store: Store): string {
  *     payload covers its term. So a class you dropped this term disappears, but last term's classes (which Canvas
  *     and Gradescope stop listing once a term ends) stay with their final grades.
  * Courses from other sources are never touched. Prefs are keyed by merged course, so they survive.
+ * Syllabus documents are saved as text only (at most 60 KB per course): PDFs never go into localStorage.
  */
 export function applyPayload(store: Store, payload: SyncPayload): Store {
+  payload = capSyllabusText(payload)
   // A real sync replaces the sample data (never mix demo courses with real ones), keeping hand-added classes.
   if (store.demo) store = withoutDemo(store)
   const lastSync = { ...store.lastSync, [payload.kind]: payload.at }

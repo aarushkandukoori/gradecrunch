@@ -9,12 +9,14 @@ import { EXT_PORT_NAME, type ExtProgress, type ExtRequest, type ExtResponse, typ
 import {
   CONSENT_KEY,
   OFFSCREEN_PATH,
+  PDF_ORIGINS,
   SITE_URL,
   isAllowedOrigin,
   isOffscreenProgress,
   isSourceResultFor,
   lastResultKey,
   parseRequest,
+  resultForStorage,
   resultFromError,
   type OffscreenSyncRequest,
 } from './rules'
@@ -117,7 +119,9 @@ async function runJob(source: ExtSource): Promise<ExtSourceResult> {
   let result: ExtSourceResult
   try {
     await ensureOffscreen()
-    const request: OffscreenSyncRequest = { target: 'offscreen', type: 'sync', source }
+    // The offscreen page cannot use chrome.permissions, so we check here whether it may download syllabus PDFs.
+    const pdfs = source === 'canvas' && (await canReadPdfs())
+    const request: OffscreenSyncRequest = { target: 'offscreen', type: 'sync', source, pdfs }
     const answer = await chrome.runtime.sendMessage(request)
     result = isSourceResultFor(answer, source) ? answer : { source, status: 'error', message: 'The sync page gave no answer' }
   } catch (err) {
@@ -128,11 +132,22 @@ async function runJob(source: ExtSource): Promise<ExtSourceResult> {
   return result
 }
 
+/** True when the student allowed reading syllabus PDFs (the optional host permission from the welcome page). */
+async function canReadPdfs(): Promise<boolean> {
+  try {
+    return await chrome.permissions.contains({ origins: PDF_ORIGINS })
+  } catch {
+    return false
+  }
+}
+
 /** Keep the last good grades per site, so the website can be told about them later without a new sync.
  *  Only 'ok' results: a failed sync should not wipe the last good copy. */
 async function saveLastResult(result: ExtSourceResult): Promise<void> {
   try {
-    await chrome.storage.local.set({ [lastResultKey(result.source)]: { at: new Date().toISOString(), result } })
+    await chrome.storage.local.set({
+      [lastResultKey(result.source)]: { at: new Date().toISOString(), result: resultForStorage(result) },
+    })
   } catch {
     // Storage full or unavailable: the website still gets the result, we just do not keep a copy.
   }

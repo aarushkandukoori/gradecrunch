@@ -10,9 +10,19 @@ import {
   parseSyncFragment,
   type IncomingMessage,
 } from '../src/lib/bookmarklet'
-import { decodePayload } from '../src/lib/payload'
+import { decodePayload, encodePayload, fromBase64Url } from '../src/lib/payload'
 import { BOOKMARKLET_BUILT_VERSION, BOOKMARKLET_CODE } from '../src/generated/bookmarklet'
-import { detectSite, runSync, syncUrl, type ReceiverTab, type RunDeps } from '../bookmarklet/run'
+import {
+  detectSite,
+  fallbackUrl,
+  MAX_FALLBACK_URL,
+  messagePayload,
+  realDeps,
+  runSync,
+  syncUrl,
+  type ReceiverTab,
+  type RunDeps,
+} from '../bookmarklet/run'
 
 type GuardedWindow = Window & { __gradeSyncRunning?: boolean }
 
@@ -479,3 +489,140 @@ describe('isGradeSiteOrigin', () => {
   })
 })
 
+
+// ---------------------------------------------------------------- syllabi (made-up data)
+
+/** Read a fallback link's payload back WITHOUT the app's validation, to see exactly what the bookmarklet sent. */
+async function rawPayload(url: string): Promise<any> {
+  const encoded = parseSyncFragment(new URL(url).hash)!.payload
+  const gz = new Response(fromBase64Url(encoded.slice(1)) as Uint8Array<ArrayBuffer>).body!
+  return JSON.parse(await new Response(gz.pipeThrough(new DecompressionStream('gzip'))).text())
+}
+
+/** Random bytes as base64: random data does not compress, like a real PDF. */
+function randomBase64(bytes: number): string {
+  const data = new Uint8Array(bytes)
+  for (let i = 0; i < bytes; i += 65536) crypto.getRandomValues(data.subarray(i, i + 65536))
+  let binary = ''
+  for (let i = 0; i < data.length; i += 0x8000) binary += String.fromCharCode(...data.subarray(i, i + 0x8000))
+  return btoa(binary)
+}
+
+function canvasPayloadWithPdf(pdfBase64: string): SyncPayload {
+  return {
+    ...payload,
+    kind: 'canvas',
+    courses: [
+      {
+        ...payload.courses[0],
+        source: 'canvas',
+        url: 'https://canvas.cmu.edu/courses/1',
+        syllabus: [
+          { source: 'canvas-syllabus', name: 'Syllabus page', url: null, text: 'Final Exam: 30%' },
+          { source: 'canvas-file', name: 'Syllabus.pdf', url: null, pdfBase64 },
+        ],
+      },
+    ],
+  }
+}
+
+describe('syllabi in the bookmarklet', () => {
+  test('the bundle includes the syllabus collection', () => {
+    expect(BOOKMARKLET_CODE).toContain('syllabus_body')
+    expect(BOOKMARKLET_CODE).toContain('search_term=syllabus')
+  })
+
+  test('the real Canvas sync reads the Syllabus page and PDFs same-origin', async () => {
+    const asked: string[] = []
+    vi.stubGlobal('fetch', async (url: string) => {
+      asked.push(url)
+      const json = (data: unknown) => new Response(JSON.stringify(data), { status: 200 })
+      if (url.startsWith('/api/v1/courses?')) {
+        return json([{ id: 4, name: 'Made-up Course', course_code: '99102', term: { name: 'Fall 2026' }, enrollments: [{ type: 'student' }] }])
+      }
+      if (url.startsWith('/api/v1/courses/4/assignment_groups')) return json([])
+      if (url === '/api/v1/courses/4?include[]=syllabus_body') return json({ syllabus_body: '<p>Quizzes: 15%</p>' })
+      if (url === '/api/v1/courses/4/files?search_term=syllabus&per_page=20') {
+        return json([{ id: 8, display_name: 'Syllabus.pdf', 'content-type': 'application/pdf', size: 12, url: 'https://canvas.cmu.edu/files/8/download?verifier=z' }])
+      }
+      if (url === '/files/8/download?verifier=z') return new Response('%PDF-1.7 fake', { status: 200 })
+      return new Response('{}', { status: 404 })
+    })
+    try {
+      const result = await realDeps('https://example.pages.dev').syncCanvas(() => {})
+      expect(result.courses[0].syllabus?.map((d) => d.source)).toEqual(['canvas-syllabus', 'canvas-file'])
+      expect(atob(result.courses[0].syllabus?.[1].pdfBase64 ?? '')).toBe('%PDF-1.7 fake')
+      expect(asked).toContain('/files/8/download?verifier=z') // relative: stays on the Canvas page's own origin
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  test('a small payload keeps its PDFs in the fallback link', async () => {
+    const small = canvasPayloadWithPdf('JVBERi0xLjQ=')
+    const encoded = await encodePayload(small)
+    const url = await fallbackUrl('https://example.pages.dev', small, encoded)
+    expect(url).toBe(syncUrl('https://example.pages.dev', encoded))
+    expect((await rawPayload(url)).courses[0].syllabus[1].pdfBase64).toBe('JVBERi0xLjQ=')
+  })
+
+  test('PDFs too big for a link are left out of the fallback, with a warning', async () => {
+    const big = canvasPayloadWithPdf(randomBase64(1_600_000))
+    const url = await fallbackUrl('https://example.pages.dev', big, await encodePayload(big))
+    expect(url.length).toBeLessThanOrEqual(MAX_FALLBACK_URL)
+    const sent = await rawPayload(url)
+    expect(sent.courses[0].syllabus).toEqual([
+      { source: 'canvas-syllabus', name: 'Syllabus page', url: null, text: 'Final Exam: 30%' },
+      { source: 'canvas-file', name: 'Syllabus.pdf', url: null },
+    ])
+    expect(sent.warnings).toEqual([expect.stringContaining('Syllabus PDFs were too big')])
+    expect(big.courses[0].syllabus?.[1].pdfBase64).toBeTruthy() // the original is untouched
+  })
+
+  test('the postMessage payload leaves PDFs out only when they would be too big for the app', async () => {
+    const withPdf = canvasPayloadWithPdf(randomBase64(30_000))
+    const kept = await decodePayload(await messagePayload(withPdf))
+    expect(kept.courses[0].syllabus?.[1].pdfBase64).toBeTruthy()
+
+    const dropped = await decodePayload(await messagePayload(withPdf, 10_000)) // pretend the limit is tiny
+    expect(dropped.courses[0].syllabus?.map((d) => d.pdfBase64)).toEqual([undefined])
+    expect(dropped.warnings).toEqual([expect.stringContaining('Syllabus PDFs were too big to send')])
+  })
+
+  test('runSync uses the smaller link when the popup was blocked', async () => {
+    const big = canvasPayloadWithPdf(randomBase64(1_600_000))
+    const deps = fakeDeps({ hostname: 'canvas.cmu.edu', syncCanvas: async () => big })
+    await runSync(deps)
+    expect(deps.navigated).toHaveLength(1)
+    expect(deps.navigated[0].length).toBeLessThanOrEqual(MAX_FALLBACK_URL)
+  })
+
+  test('the postMessage handoff keeps the PDFs', async () => {
+    const withPdf = canvasPayloadWithPdf('JVBERi0xLjQ=')
+    const posted: any[] = []
+    let handler: ((e: IncomingMessage) => void) | null = null
+    const receiver: ReceiverTab = {
+      closed: false,
+      postMessage: (m) => {
+        posted.push(m)
+        queueMicrotask(() => handler?.({ source: receiver, origin: 'https://example.pages.dev', data: { type: 'gradecrunch:done', ok: true } }))
+      },
+      focus: () => {},
+      close: () => {},
+    }
+    const deps = fakeDeps({
+      hostname: 'canvas.cmu.edu',
+      syncCanvas: async () => withPdf,
+      openReceiver: () => receiver,
+      listen: (h) => {
+        handler = h
+        queueMicrotask(() => h({ source: receiver, origin: 'https://example.pages.dev', data: { type: 'gradecrunch:ready' } }))
+        return () => {}
+      },
+    })
+    await runSync(deps)
+    expect(posted).toHaveLength(1)
+    const sent = await rawPayload('https://x/#sync=' + posted[0].payload)
+    expect(sent.courses[0].syllabus[1].pdfBase64).toBe('JVBERi0xLjQ=')
+  })
+})

@@ -281,3 +281,51 @@ describe('validatePayload', () => {
     expect(validatePayload(p).courses[0].scheme).toBeNull()
   })
 })
+
+describe('validatePayload: syllabus documents', () => {
+  function withSyllabus(syllabus: unknown, kind: SyncPayload['kind'] = 'canvas'): unknown {
+    const p = samplePayload() as unknown as { kind: string; courses: Record<string, unknown>[] }
+    p.kind = kind
+    p.courses[0].syllabus = syllabus
+    return p
+  }
+
+  test('keeps text and PDF documents with safe links', () => {
+    const p = validatePayload(
+      withSyllabus([
+        { source: 'canvas-syllabus', name: 'Syllabus page', url: 'https://canvas.cmu.edu/courses/1001/assignments/syllabus', text: 'Grading\nHomework 50%' },
+        { source: 'canvas-file', name: 'syllabus.pdf', url: 'javascript:alert(1)', pdfBase64: 'JVBERi0xLjQK' },
+      ]),
+    )
+    expect(p.courses[0].syllabus).toEqual([
+      { source: 'canvas-syllabus', name: 'Syllabus page', url: 'https://canvas.cmu.edu/courses/1001/assignments/syllabus', text: 'Grading\nHomework 50%' },
+      { source: 'canvas-file', name: 'syllabus.pdf', url: null, pdfBase64: 'JVBERi0xLjQK' },
+    ])
+  })
+
+  test('caps: 5 documents per course, 200 KB of text, 4 MB of base64; bad documents are dropped', () => {
+    const many = Array.from({ length: 7 }, (_, i) => ({ source: 'canvas-file', name: `f${i}.pdf`, url: null, text: 'x' }))
+    const p = validatePayload(withSyllabus(many))
+    expect(p.courses[0].syllabus).toHaveLength(5)
+    expect(p.warnings).toContain('Matrices and Linear Transformations — ünïcødé ✓: only the first 5 syllabus documents were kept.')
+
+    const big = validatePayload(
+      withSyllabus([
+        { source: 'canvas-syllabus', name: 'Long page', url: null, text: 'y'.repeat(300_000) },
+        { source: 'canvas-file', name: 'huge.pdf', url: null, pdfBase64: 'A'.repeat(4 * 1024 * 1024 + 4) },
+        { source: 'canvas-file', name: 'not-base64.pdf', url: null, pdfBase64: '<script>' },
+        { source: 'somewhere-else', name: 'x', url: null, text: 'Homework 100%' },
+        { source: 'canvas-front-page', name: 'Empty home page', url: null },
+        'junk',
+      ]),
+    )
+    expect(big.courses[0].syllabus?.map((d) => d.name)).toEqual(['Long page'])
+    expect(big.courses[0].syllabus?.[0].text).toHaveLength(200_000)
+    expect(big.warnings.some((w) => w.includes('huge.pdf is too big'))).toBe(true)
+  })
+
+  test('only Canvas payloads carry syllabus documents', () => {
+    const p = validatePayload(withSyllabus([{ source: 'canvas-syllabus', name: 'Syllabus page', url: null, text: 'Homework 100%' }], 'gradescope'))
+    expect(p.courses[0].syllabus).toBeUndefined()
+  })
+})

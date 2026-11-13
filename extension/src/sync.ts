@@ -4,7 +4,7 @@
 // permissions for the three grade sites, Chrome sends the student's own cookies with these requests.
 import type { ExtSource, ExtSourceResult } from '../protocol'
 import { AUTOLAB_ORIGIN, CANVAS_ORIGIN, GRADESCOPE_ORIGIN } from '../../src/lib/brand'
-import { absoluteFetcher, syncCanvas } from '../../src/sync/canvas'
+import { absoluteBinaryFetcher, absoluteFetcher, syncCanvas } from '../../src/sync/canvas'
 import { syncGradescope } from '../../src/sync/gradescope'
 import { syncAutolab } from '../../src/sync/autolab'
 import { resultFromError } from './rules'
@@ -46,12 +46,20 @@ export async function autolabFetchPage(path: string): Promise<{ html: string; ur
  * Sync one site and describe the outcome as an ExtSourceResult. Never throws: every failure becomes a 'login' or
  * 'error' result so the website always gets one answer per site.
  * Gradescope keeps its built-in one-page-a-second pace (GRADESCOPE_PAUSE_MS inside syncGradescope).
+ * `pdfs`: the student granted the PDF permission, so Canvas syllabus PDFs can be downloaded too. Without it the Canvas
+ * sync still reads the Syllabus page and home page text.
  */
-export async function runSource(source: ExtSource, onProgress: (message: string) => void): Promise<ExtSourceResult> {
+export async function runSource(
+  source: ExtSource,
+  onProgress: (message: string) => void,
+  options: { pdfs?: boolean } = {},
+): Promise<ExtSourceResult> {
   try {
     let payload
-    if (source === 'canvas') payload = await syncCanvas(absoluteFetcher(CANVAS_ORIGIN), onProgress)
-    else if (source === 'gradescope') payload = await syncGradescope(gradescopeFetchText, onProgress)
+    if (source === 'canvas') {
+      const fetchBinary = options.pdfs ? absoluteBinaryFetcher(CANVAS_ORIGIN) : null
+      payload = await syncCanvas(absoluteFetcher(CANVAS_ORIGIN), onProgress, { syllabus: { fetchBinary } })
+    } else if (source === 'gradescope') payload = await syncGradescope(gradescopeFetchText, onProgress)
     else payload = await syncAutolab(autolabFetchPage, onProgress)
     return { source, status: 'ok', payload }
   } catch (err) {

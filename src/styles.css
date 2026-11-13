@@ -1583,6 +1583,18 @@ code {
   gap: 32px;
 }
 
+/* "Weights · Homework 15% · ... · from syllabus" under the class header. */
+.weights-line {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: -16px; /* sits close to the header, not a full section apart */
+}
+
+.weights-line p {
+  margin: 0;
+}
+
 .detail-section,
 .edit-section {
   display: flex;

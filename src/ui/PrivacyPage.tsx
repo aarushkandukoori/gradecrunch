@@ -16,8 +16,10 @@ export function PrivacyPage() {
       <h2>What is read</h2>
       <p>
         When you click the Sync button on canvas.cmu.edu, gradescope.com or autolab.andrew.cmu.edu, it reads your own
-        courses, assignments, scores and letter cutoffs using the session you are already logged in with. It does not
-        read messages, files, classmates or anything else, and it never submits, changes or opens an assignment.
+        courses, assignments, scores and letter cutoffs using the session you are already logged in with. On Canvas it
+        also reads each class's syllabus (the Syllabus page, the course home page and PDF files named like a syllabus),
+        only to find the real grading weights. It does not read messages, other files, classmates or anything else,
+        and it never submits, changes or opens an assignment.
       </p>
       <ul>
         <li>Canvas: Canvas's official REST API (the same one Canvas's own pages use).</li>
@@ -53,6 +55,12 @@ export function PrivacyPage() {
           assignments, scores and letter cutoffs there. It only reads; it never submits or changes anything.
         </li>
         <li>
+          Optional access to inscloudgate.net (asked with a checkbox on the welcome screen): Canvas stores uploaded
+          files there, so this lets the extension download your classes' syllabus PDFs to read the grading weights.
+          Without it, everything else still works. The PDFs are turned into text in this page; the files themselves are
+          never saved.
+        </li>
+        <li>
           Storage: to remember that you finished its welcome screen, and to keep a copy of your last synced grades
           inside the extension, on your computer. Removing the extension deletes it.
         </li>
@@ -75,7 +83,8 @@ export function PrivacyPage() {
       <p>Only in your browser's local storage, under these keys:</p>
       <ul>
         <li>
-          <code>{STORE_KEY}</code>: your synced grades, settings and what-ifs.
+          <code>{STORE_KEY}</code>: your synced grades, settings and what-ifs, plus the text of each class's syllabus
+          (at most 60 KB per class) so the grading weights stay right between syncs.
         </li>
         <li>
           <code>{THEME_KEY}</code>: light or dark mode, if you picked one.

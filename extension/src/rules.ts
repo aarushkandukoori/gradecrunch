@@ -2,7 +2,8 @@
 // other, and the checks on anything that arrives from outside. No chrome.* calls here, so tests can import it.
 import type { ExtRequest, ExtSource, ExtSourceResult } from '../protocol'
 import { LOGIN_URLS } from '../protocol'
-import { CanvasAuthError } from '../../src/sync/canvas'
+import type { SyncPayload } from '../../src/types'
+import { CanvasAuthError, withoutSyllabusPdfs } from '../../src/sync/canvas'
 
 /** The GradeCrunch website. The toolbar button and the welcome page open it. */
 export const SITE_URL = 'https://grades.aarushkandukoori.com/'
@@ -16,6 +17,13 @@ export const lastResultKey = (source: ExtSource) => 'last:' + source // last syn
 
 export const ALL_SOURCES: ExtSource[] = ['canvas', 'gradescope', 'autolab']
 
+/**
+ * Canvas keeps uploaded files (syllabus PDFs) on its storage service and redirects downloads there. The extension
+ * may only read those answers with a host permission for it. It is optional: the student grants it on the welcome
+ * page, and without it the sync just skips PDFs (the Syllabus page and home page text still work).
+ */
+export const PDF_ORIGINS = ['https://*.inscloudgate.net/*']
+
 // ---------------------------------------------------------------- service worker <-> offscreen messages
 // chrome.runtime.sendMessage reaches every page of the extension, so each message names who it is for.
 
@@ -24,6 +32,7 @@ export interface OffscreenSyncRequest {
   target: 'offscreen'
   type: 'sync'
   source: ExtSource
+  pdfs?: boolean // Canvas only: true when the student granted PDF_ORIGINS (only the service worker can check that)
 }
 
 /** Offscreen -> service worker: a progress line for one site. */
@@ -57,6 +66,17 @@ export function isSourceResultFor(x: unknown, source: ExtSource): x is ExtSource
   if (x.status === 'login') return typeof x.loginUrl === 'string'
   if (x.status === 'error') return typeof x.message === 'string'
   return false
+}
+
+/**
+ * The copy of a result we keep in chrome.storage.local, minus the raw syllabus PDFs: storage.local holds about 10 MB
+ * and a few PDFs could fill it. The website already got the full result with the PDFs.
+ */
+export function resultForStorage(result: ExtSourceResult): ExtSourceResult {
+  if (result.status !== 'ok') return result
+  const payload = result.payload
+  if (typeof payload !== 'object' || payload === null || !Array.isArray((payload as { courses?: unknown }).courses)) return result
+  return { ...result, payload: withoutSyllabusPdfs(payload as SyncPayload) }
 }
 
 // ---------------------------------------------------------------- checks on the website's port

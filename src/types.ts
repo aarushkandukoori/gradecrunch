@@ -199,6 +199,8 @@ export interface Course {
   unitsSource: 'catalog' | 'custom' | 'default'
   manualPercent: number | null // from a ManualCourse
   prefs: CoursePrefs
+  weightNote?: string | null // why the weights differ from Canvas, e.g. "Using syllabus weights; Canvas isn't weighted"
+  syllabusUsed?: { name: string; url: string | null } | null // the syllabus document the weights came from
 }
 
 // ---------------------------------------------------------------- grade math results

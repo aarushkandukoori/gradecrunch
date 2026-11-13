@@ -17,6 +17,13 @@ export const MSG_READY = 'gradecrunch:ready'
 export const MSG_SYNC = 'gradecrunch:sync'
 export const MSG_DONE = 'gradecrunch:done'
 
+/**
+ * Longest `payload` string the app accepts in a sync message. The app refuses anything that unzips to more than
+ * 10 MB (MAX_DECODED_BYTES in src/lib/payload.ts), and 10 MB written as base64url is about 13.4 million characters,
+ * so a bigger string could never be valid anyway. Syllabus PDFs (up to 5 MB per sync) fit comfortably.
+ */
+export const MAX_MESSAGE_CHARS = 14_000_000
+
 /** Bookmarklet -> app: the grades, encoded with encodePayload, plus the bookmarklet version. */
 export interface SyncMessage {
   type: typeof MSG_SYNC

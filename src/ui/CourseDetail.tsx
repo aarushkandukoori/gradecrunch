@@ -6,7 +6,7 @@ import { courseLabel, dropRuleText, formatPercent } from '../lib/format'
 import { isCountable } from '../lib/grade'
 import { randomId, withCutoff, withPlanned, withWeight } from '../lib/store'
 import { activeWhatIfs, whatIfApplies, withoutWhatIfs } from '../lib/whatIfs'
-import type { Course, CoursePrefs, GradeCut, GradeResult, Level, NeededResult } from '../types'
+import type { Category, Course, CoursePrefs, GradeCut, GradeResult, Level, NeededResult } from '../types'
 import { ItemRow } from './ItemRow'
 import { NumberField } from './NumberField'
 import { PlusIcon, TrashIcon } from './icons'
@@ -55,6 +55,8 @@ export function CourseDetail({ course, grade, needed, level, onPrefs, onRemove }
 
   return (
     <div className="detail">
+      <WeightsLine course={course} grade={grade} />
+
       {needed.length > 0 && (
         <section className="detail-section" aria-labelledby="need-title">
           <h2 id="need-title">What you need</h2>
@@ -158,6 +160,63 @@ export function CourseDetail({ course, grade, needed, level, onPrefs, onRemove }
   )
 }
 
+const SOURCE_TEXT: Record<NonNullable<Category['weightSource']>, string> = {
+  syllabus: 'from syllabus',
+  canvas: 'from Canvas',
+  you: 'set by you',
+}
+
+/**
+ * One short line under the class header: each category's weight and where it came from, why it differs from
+ * Canvas (if it does), and a link to the syllabus the weights were read from.
+ * "Weights · Homework 15% · Quizzes 15% · Final Exam 30% · from syllabus"
+ */
+export function WeightsLine({ course, grade }: { course: Course; grade: GradeResult }) {
+  const shown = course.categories.filter((c) => (c.weight ?? 0) > 0)
+  if (!course.weighted || shown.length === 0) return null
+  const sourceOf = (c: Category) => c.weightSource ?? 'canvas'
+  const sources = new Set(shown.map(sourceOf))
+  const one = sources.size === 1 ? sourceOf(shown[0]) : null // one source for all: say it once at the end
+  // Canvas's own number, for comparison, when we use different weights (a what-if would make it look wrong).
+  const p = grade.percent
+  const canvasDiffers =
+    course.weightNote && course.canvasScore != null && p != null && Math.abs(course.canvasScore - p) > 0.5 && activeWhatIfs(course).length === 0
+  const doc = course.syllabusUsed
+  return (
+    <section className="weights-line" aria-label="Weights">
+      <p className="small">
+        <strong>Weights</strong>
+        {shown.map((c) => (
+          <span key={c.key}>
+            {' · '}
+            {c.name} {Math.round((c.weight ?? 0) * 100) / 100}%{one ? '' : <span className="muted"> ({SOURCE_TEXT[sourceOf(c)]})</span>}
+          </span>
+        ))}
+        {one && <span className="muted"> · {SOURCE_TEXT[one]}</span>}
+      </p>
+      {(course.weightNote || doc) && (
+        <p className="muted small">
+          {course.weightNote && `${course.weightNote}. `}
+          {canvasDiffers && `Canvas shows ${formatPercent(course.canvasScore)}. `}
+          {doc && (
+            <>
+              Read from{' '}
+              {doc.url ? (
+                <a href={doc.url} target="_blank" rel="noreferrer">
+                  {doc.name}
+                </a>
+              ) : (
+                doc.name
+              )}
+              .
+            </>
+          )}
+        </p>
+      )}
+    </section>
+  )
+}
+
 /** Category weights from the syllabus, and the switch between weights and plain total points. */
 function Weights({ course, onPrefs }: Pick<Props, 'course' | 'onPrefs'>) {
   const hasCanvas = course.sources.some((s) => s.source === 'canvas')
@@ -203,7 +262,7 @@ function Weights({ course, onPrefs }: Pick<Props, 'course' | 'onPrefs'>) {
           // Typing a weight also turned weighting on, so undo both: back to exactly what the site uses.
           onClick={() => onPrefs((p) => ({ ...p, weights: undefined, weighted: undefined }))}
         >
-          Reset to {hasCanvas ? 'Canvas' : 'original'} weights
+          Reset to {course.syllabusUsed ? 'syllabus' : hasCanvas ? 'Canvas' : 'original'} weights
         </button>
       )}
     </section>

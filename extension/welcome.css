@@ -47,8 +47,21 @@ p {
 a {
   color: var(--green);
 }
+.check {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 24px;
+  cursor: pointer;
+}
+.check input {
+  width: 18px;
+  height: 18px;
+  margin: 3px 0 0;
+  accent-color: var(--green);
+}
 button {
-  margin-top: 28px;
+  margin-top: 20px;
   width: 100%;
   padding: 16px;
   border: 0;

@@ -390,6 +390,19 @@ describe('startReceiver', () => {
     expect(f.ticking).toBe(false)
   })
 
+  test('grades too big to accept get an error answer instead of silence', async () => {
+    const f = fake()
+    const onSync = vi.fn()
+    startReceiver(f.deps, onSync)
+    f.send({ type: 'gradecrunch:sync', payload: 'x'.repeat(MAX_PAYLOAD_CHARS), bv: 2 })
+    await settle(20)
+    expect(onSync).not.toHaveBeenCalled()
+    expect(f.posted.at(-1)).toEqual({
+      message: { type: 'gradecrunch:done', ok: false, message: expect.stringContaining('too big') },
+      origin: 'https://canvas.cmu.edu',
+    })
+  })
+
   test('a site can only send its own kind of grades', async () => {
     const f = fake()
     const onSync = vi.fn()
@@ -974,5 +987,91 @@ describe('rowHint', () => {
     expect(rowHint(course({ prefs: { hidden: true } }), needed, GRADE, 'A', true)).toBe('Hidden')
     expect(rowHint(course(), needed, GRADE, 'A', true)).toBe('Includes what-if scores')
     expect(rowHint(course(), [need('A', 90, 'unknown')], GRADE)).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------- syllabus weights
+
+/** A tiny real PDF built here (made-up text): "Grading", "Homework 40%", "Exams 60%". */
+function tinySyllabusPdf(): string {
+  const lines: [number, string][] = [
+    [720, 'Grading'],
+    [700, 'Homework 40%'],
+    [680, 'Exams 60%'],
+  ]
+  const content = 'BT /F1 12 Tf ' + lines.map(([y, t]) => `1 0 0 1 72 ${y} Tm (${t}) Tj`).join(' ') + ' ET'
+  const objects = [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>',
+    `<< /Length ${content.length} >>\nstream\n${content}\nendstream`,
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+  ]
+  let pdf = '%PDF-1.4\n'
+  const offsets: number[] = []
+  objects.forEach((o, i) => {
+    offsets.push(pdf.length)
+    pdf += `${i + 1} 0 obj\n${o}\nendobj\n`
+  })
+  const xref = pdf.length
+  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n` + offsets.map((o) => `${String(o).padStart(10, '0')} 00000 n \n`).join('')
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`
+  return btoa(pdf)
+}
+
+describe('syllabus weights in the app', () => {
+  const KEY = 'Fall 2026|21241'
+  const PATH = '/class/' + encodeURIComponent(KEY)
+
+  test('a synced syllabus PDF is saved as text (never the PDF) and its weights replace unweighted Canvas', async () => {
+    const course = syncedCanvas('5', {
+      weighted: false, // Canvas in points mode
+      syllabus: [{ source: 'canvas-file', name: 'syllabus.pdf', url: 'https://canvas.cmu.edu/courses/5/files/9', pdfBase64: tinySyllabusPdf() }],
+    })
+    const encoded = await encodePayload(payload([course]))
+    window.history.replaceState(null, '', `/#sync=${encoded}&bv=1`)
+    await renderApp()
+    for (let i = 0; i < 40 && !localStorage.getItem(STORE_KEY)?.includes('canvas:5'); i++) await settle(50) // pdf.js reads the file
+    const saved = savedStore().synced['canvas:5']
+    expect(saved.syllabus).toEqual([
+      { source: 'canvas-file', name: 'syllabus.pdf', url: 'https://canvas.cmu.edu/courses/5/files/9', text: 'Grading\nHomework 40%\nExams 60%' },
+    ])
+    expect(localStorage.getItem(STORE_KEY)).not.toContain('pdfBase64')
+
+    // The class page shows where the weights came from, why they differ from Canvas, and links the syllabus.
+    window.history.replaceState(null, '', PATH)
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    await settle(0)
+    const line = container.querySelector('.weights-line')!
+    expect(line.textContent).toContain('Weights · Homework 40% · Exams 60% · from syllabus')
+    expect(line.textContent).toContain("Using syllabus weights; Canvas isn't weighted.")
+    expect(line.querySelector('a')?.getAttribute('href')).toBe('https://canvas.cmu.edu/courses/5/files/9')
+  }, 20_000)
+
+  test('with syllabus weights, Reset goes back to the syllabus weights', async () => {
+    const c = course({ prefs: { weights: { hw: 50 }, weighted: true }, syllabusUsed: { name: 'Syllabus page', url: null } })
+    await render(createElement(CourseDetail, { course: c, grade: GRADE, needed: [], level: 'undergrad', onPrefs: vi.fn() }))
+    expect(buttonByText('Reset to syllabus weights')).toBeInstanceOf(HTMLButtonElement)
+  })
+
+  test('the Weights line names each source when they are mixed, and stays out of points mode', async () => {
+    const mixed: Category[] = [
+      { ...CATEGORIES[0], weight: 25, weightSource: 'you' },
+      { ...CATEGORIES[1], weight: 75, weightSource: 'syllabus' },
+    ]
+    await render(createElement(CourseDetail, { course: course({ categories: mixed }), grade: GRADE, needed: [], level: 'undergrad', onPrefs: vi.fn() }))
+    expect(container.querySelector('.weights-line')?.textContent).toBe('Weights · Homework 25% (set by you) · Exams 75% (from syllabus)')
+    act(() => root?.unmount())
+    root = null
+
+    await render(createElement(CourseDetail, { course: course({ weighted: false }), grade: GRADE, needed: [], level: 'undergrad', onPrefs: vi.fn() }))
+    expect(container.querySelector('.weights-line')).toBeNull()
+  })
+
+  test('Canvas weights alone: "from Canvas", no note', async () => {
+    const canvasCats: Category[] = CATEGORIES.map((c) => ({ ...c, weightSource: 'canvas' }))
+    await render(createElement(CourseDetail, { course: course({ categories: canvasCats }), grade: GRADE, needed: [], level: 'undergrad', onPrefs: vi.fn() }))
+    const line = container.querySelector('.weights-line')!
+    expect(line.textContent).toBe('Weights · Homework 40% · Exams 60% · from Canvas')
   })
 })

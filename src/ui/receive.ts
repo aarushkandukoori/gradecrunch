@@ -7,7 +7,7 @@
 //
 // Fallback (#sync= link): when a popup blocker stops the new tab, the bookmarklet navigates to /#sync=<grades>.
 // Anyone can make such a link, so an old one asks before replacing anything (see syncLinkIsStale).
-import { MSG_DONE, MSG_READY, MSG_SYNC, type DoneMessage, type IncomingMessage } from '../lib/bookmarklet'
+import { MAX_MESSAGE_CHARS, MSG_DONE, MSG_READY, MSG_SYNC, type DoneMessage, type IncomingMessage } from '../lib/bookmarklet'
 import { decodePayload } from '../lib/payload'
 import type { SyncPayload } from '../types'
 
@@ -22,7 +22,8 @@ export const SYNC_ORIGINS: Record<string, SyncPayload['kind']> = {
 
 export const READY_EVERY_MS = 250 // how often we say "ready" until the grades arrive
 export const READY_TRIES = 60 // give up saying "ready" after 60 tries (15 seconds)
-export const MAX_PAYLOAD_CHARS = 2_000_000 // a real sync is far smaller; refuse anything bigger before decoding
+// Refuse anything bigger before decoding. Shared with the bookmarklet, which leaves syllabus PDFs out to stay under it.
+export const MAX_PAYLOAD_CHARS = MAX_MESSAGE_CHARS
 
 /** The bits of the browser the receiver uses. Passed in so tests can fake them. */
 export interface ReceiverDeps {
@@ -79,7 +80,13 @@ export function startReceiver(
     if (event.source !== opener || !site) return
     const data = event.data as { type?: unknown; payload?: unknown; bv?: unknown } | null
     if (!data || typeof data !== 'object' || data.type !== MSG_SYNC) return
-    if (typeof data.payload !== 'string' || data.payload.length >= MAX_PAYLOAD_CHARS) return
+    if (typeof data.payload !== 'string') return
+    if (data.payload.length >= MAX_PAYLOAD_CHARS) {
+      // Say so instead of staying quiet, or the Sync button would wait for an answer that never comes.
+      const tooBig: DoneMessage = { type: MSG_DONE, ok: false, message: 'Those grades were too big to send. Click Sync again.' }
+      opener.postMessage(tooBig, event.origin)
+      return
+    }
     received = true
     stopReady()
     const version = typeof data.bv === 'number' && Number.isInteger(data.bv) ? data.bv : null

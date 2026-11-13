@@ -59,10 +59,15 @@ is in SIO.
     service workers cannot use.
   - Host permissions (canvas.cmu.edu, www.gradescope.com, autolab.andrew.cmu.edu): Reads your own courses, assignments,
     scores and letter cutoffs from these sites with the login you already have, only when the GradeCrunch website asks
-    (when you open it or click Sync).
+    (when you open it or click Sync). On Canvas this includes each class's syllabus (Syllabus page, home page and
+    syllabus PDFs), used only to read the grading weights.
+  - Optional host permission (https://*.inscloudgate.net/*): Asked with a checkbox on the welcome page. Canvas keeps
+    uploaded files such as syllabus PDFs on this Instructure storage service and redirects downloads there.
+    GradeCrunch downloads only the syllabus PDFs of your own classes, to read the real grading weights. Without it,
+    everything else still works.
 - **Remote code:** No, I am not using remote code.
-- **Data usage:** collects **Website content** only (course names, assignment names, scores and letter cutoffs read from
-  those sites). It stays on the user's device and is shown only on the GradeCrunch website.
+- **Data usage:** collects **Website content** only (course names, assignment names, scores, letter cutoffs and
+  syllabus text read from those sites). It stays on the user's device and is shown only on the GradeCrunch website.
 - **Certifications:** tick all three (not sold to third parties; not used or transferred for purposes unrelated to the
   single purpose; not used to determine creditworthiness or for lending).
 - **Privacy policy URL:** https://grades.aarushkandukoori.com/privacy
