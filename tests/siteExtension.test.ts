@@ -4,15 +4,21 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
+import { DEV_EXTENSION_ID, LOGIN_URLS } from '../extension/protocol'
 import {
   AUTOLAB_SETTING_KEY,
   detectExtension,
+  EXTENSION_VERSION,
   loginSources,
   mergeNotes,
   needsAutoSync,
+  needsReload,
+  olderVersion,
   openExtensionWelcome,
   pickSources,
+  reloadExtension,
   safeLoginUrl,
+  supportedSources,
   syncWithExtension,
   type ChromeLike,
   type ChromePort,
@@ -64,6 +70,7 @@ beforeEach(() => {
   ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
   window.scrollTo = () => {}
   localStorage.clear()
+  sessionStorage.clear()
   window.history.replaceState(null, '', '/')
   container = document.createElement('div')
   document.body.appendChild(container)
@@ -278,10 +285,56 @@ describe('openExtensionWelcome and helpers', () => {
     expect(needsAutoSync({ canvas: '2026-11-12T11:30:00Z', gradescope: '2026-11-12T11:55:00Z' }, now)).toBe(false)
   })
 
-  test('pickSources adds Autolab only when used before or turned on', () => {
-    expect(pickSources(false, false)).toEqual(['canvas', 'gradescope'])
-    expect(pickSources(true, false)).toEqual(['canvas', 'gradescope', 'autolab'])
-    expect(pickSources(false, true)).toEqual(['canvas', 'gradescope', 'autolab'])
+  test('pickSources: Canvas, Gradescope and SIO; Autolab only when used before or turned on', () => {
+    expect(pickSources(false, false)).toEqual(['canvas', 'gradescope', 'sio'])
+    expect(pickSources(true, false)).toEqual(['canvas', 'gradescope', 'autolab', 'sio'])
+    expect(pickSources(false, true)).toEqual(['canvas', 'gradescope', 'autolab', 'sio'])
+  })
+
+  test('pickSources only asks for sites the installed extension knows (1.0.0 has no SIO)', () => {
+    const old: ExtensionInfo = { id: INSTALLED_ID, version: '1.0.0', consent: true }
+    expect(supportedSources(old)).toEqual(['canvas', 'gradescope', 'autolab'])
+    expect(pickSources(false, false, supportedSources(old))).toEqual(['canvas', 'gradescope'])
+    const now: ExtensionInfo = { ...old, version: '1.1.0', sources: ['canvas', 'gradescope', 'autolab', 'sio'] }
+    expect(pickSources(false, false, supportedSources(now))).toEqual(['canvas', 'gradescope', 'sio'])
+  })
+
+  test('detectExtension keeps the list of sites from hello, known sites only', async () => {
+    const f = fakeChrome((msg, ext) => {
+      if ((msg as { type: string }).type === 'hello') {
+        ext.send({ type: 'hello', version: '1.1.0', consent: true, sources: ['sio', 'piazza', 'canvas'] })
+      }
+    })
+    expect(await detectExtension(f.chrome, [INSTALLED_ID])).toEqual({
+      id: INSTALLED_ID,
+      version: '1.1.0',
+      consent: true,
+      sources: ['canvas', 'sio'],
+    })
+  })
+
+  test('olderVersion compares each number', () => {
+    expect(olderVersion('1.0.0', '1.1.0')).toBe(true)
+    expect(olderVersion('1.9.0', '1.10.0')).toBe(true)
+    expect(olderVersion('1.1.0', '1.1.0')).toBe(false)
+    expect(olderVersion('1.2', '1.1.9')).toBe(false)
+    expect(olderVersion('1.1', '1.1.1')).toBe(true)
+  })
+
+  test('needsReload: only the dev build, only when it is older than this site expects', () => {
+    expect(EXTENSION_VERSION).toMatch(/^\d+\.\d+\.\d+$/)
+    expect(needsReload({ id: DEV_EXTENSION_ID, version: '1.0.0', consent: true }, '1.1.0')).toBe(true)
+    expect(needsReload({ id: DEV_EXTENSION_ID, version: '1.1.0', consent: true }, '1.1.0')).toBe(false)
+    expect(needsReload({ id: DEV_EXTENSION_ID, version: '1.2.0', consent: true }, '1.1.0')).toBe(false)
+    expect(needsReload({ id: INSTALLED_ID, version: '1.0.0', consent: true }, '1.1.0')).toBe(false) // a store copy
+  })
+
+  test('reloadExtension sends reload and rejects when the extension says no', async () => {
+    const dev = fakeChrome((_msg, ext) => ext.send({ type: 'hello', version: '1.1.0', consent: true }))
+    await reloadExtension(INSTALLED_ID, dev.chrome)
+    expect(dev.posted).toEqual([{ type: 'reload' }])
+    const store = fakeChrome((_msg, ext) => ext.send({ type: 'error', message: 'Unknown request' }))
+    await expect(reloadExtension(INSTALLED_ID, store.chrome)).rejects.toThrow('Unknown request')
   })
 
   test('mergeNotes keeps notes about sites that were not synced again', () => {
@@ -480,6 +533,88 @@ describe('App with the extension', () => {
     expect(text()).toContain('Log in to Canvas to include it.')
     expect(text()).toContain('Log in to Gradescope to include it.')
     expect(text()).not.toContain('Trouble?') // bookmarklet help is not needed
+  })
+
+  test('an extension that can sync SIO is asked for it too; an SIO login gets its own line', async () => {
+    savedStore(60)
+    const info: ExtensionInfo = { ...READY, version: '1.1.0', sources: ['canvas', 'gradescope', 'autolab', 'sio'] }
+    const client = fakeClient(info, () => [
+      { source: 'canvas', status: 'ok', payload: canvasPayload() },
+      { source: 'sio', status: 'login', loginUrl: LOGIN_URLS.sio },
+    ])
+    await renderApp(client)
+    expect(client.sync.mock.calls[0][1]).toEqual(['canvas', 'gradescope', 'sio'])
+    expect(text()).toContain('Log in to SIO to add your exact units, pass/fail classes and past semesters.')
+    const link = [...container.querySelectorAll('a')].find((a) => a.textContent === 'Log in to SIO')!
+    expect(link.getAttribute('href')).toBe('https://s3.andrew.cmu.edu/sio/mpa/grades/home')
+  })
+
+  test('a failed SIO sync keeps the SIO data saved before, and its login line says what logging in does', async () => {
+    const semesters = [
+      {
+        code: 'S26',
+        term: 'Spring 2026',
+        level: 'undergrad' as const,
+        courses: [{ title: 'Made-up Course', number: '99101', alsoNumbers: [], section: 'A', gradeOption: 'L', units: 9, midGrade: null, finalGrade: 'A' }],
+        qpa: { midSemQpa: null, unitsCarried: 9, unitsPassed: 9, factorableUnits: 9, qualityPoints: 36, finalQpa: 4, cumulativeQpa: 4 },
+      },
+    ]
+    savedStore(60, (s) => applyPayload(s, { v: 1, kind: 'sio', at: new Date(Date.now() - 3_600_000).toISOString(), courses: [], semesters, warnings: [] }))
+    const info: ExtensionInfo = { ...READY, version: '1.1.0', sources: ['canvas', 'gradescope', 'autolab', 'sio'] }
+    const client = fakeClient(info, () => [{ source: 'sio', status: 'login', loginUrl: LOGIN_URLS.sio }])
+    await renderApp(client)
+    expect(client.sync).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(localStorage.getItem(STORE_KEY)!).sio.semesters).toEqual(semesters)
+    expect(text()).toContain('Log in to SIO to check for new grades.')
+  })
+
+  test('the dev build older than this site is reloaded once, then found again', async () => {
+    savedStore(2)
+    const client = { ...fakeClient({ ...READY, id: DEV_EXTENSION_ID, version: '0.9.0' }, () => []), reload: vi.fn(async () => {}) }
+    client.detect.mockResolvedValueOnce({ ...READY, id: DEV_EXTENSION_ID, version: '0.9.0' })
+    client.detect.mockResolvedValueOnce({ ...READY, id: DEV_EXTENSION_ID, version: EXTENSION_VERSION })
+    await renderApp(client)
+    await settle(1700) // the app gives the extension 1.5 s to restart
+    expect(client.reload).toHaveBeenCalledOnce()
+    expect(client.reload).toHaveBeenCalledWith(DEV_EXTENSION_ID)
+    expect(client.detect).toHaveBeenCalledTimes(2)
+  })
+
+  test('a reload that did not help is not asked again on the next page load in the same tab', async () => {
+    savedStore(2)
+    // The files on disk are as old as the running copy (npm run build:extension wasn't run): reloading changes nothing.
+    const stale = { ...READY, id: DEV_EXTENSION_ID, version: '0.9.0' }
+    const client = { ...fakeClient(stale, () => []), reload: vi.fn(async () => {}) }
+    await renderApp(client)
+    await settle(1700)
+    expect(client.reload).toHaveBeenCalledOnce()
+
+    act(() => root?.unmount()) // the student reloads the page in the same tab
+    root = null
+    await renderApp(client)
+    await settle(50)
+    expect(client.reload).toHaveBeenCalledOnce() // no second restart (and no 1.5 s wait)
+    expect(text()).toContain('21-241') // the page still works
+
+    // A newer version on the next build is tried again.
+    client.detect.mockResolvedValue({ ...stale, version: '0.9.1' })
+    act(() => root?.unmount())
+    root = null
+    await renderApp(client)
+    await settle(1700)
+    expect(client.reload).toHaveBeenCalledTimes(2)
+  })
+
+  test('an up-to-date dev build or a store copy is never reloaded', async () => {
+    savedStore(2)
+    const current = { ...fakeClient({ ...READY, id: DEV_EXTENSION_ID, version: EXTENSION_VERSION }, () => []), reload: vi.fn(async () => {}) }
+    await renderApp(current)
+    expect(current.reload).not.toHaveBeenCalled()
+    act(() => root?.unmount())
+    root = null
+    const store = { ...fakeClient({ ...READY, version: '0.9.0' }, () => []), reload: vi.fn(async () => {}) }
+    await renderApp(store)
+    expect(store.reload).not.toHaveBeenCalled()
   })
 
   test('no extension: the app is unchanged (bookmarklet popover in the header)', async () => {

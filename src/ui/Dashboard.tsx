@@ -1,13 +1,15 @@
 // The home page once there are grades: the semester QPA, then one simple row per class. Clicking a row opens
-// that class (ClassView). Hidden classes, "add a class by hand" and Ask Claude are small links under the list.
+// that class (ClassView); the small P/F button at the end of a row counts that class as pass/fail. Hidden classes,
+// past semesters, "add a class by hand" and the AI advisor (the AI chat) are small links under the list.
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { courseLabel, formatGradePercent, formatQpa, plural } from '../lib/format'
-import { estimatedLetter } from '../lib/qpa'
+import { letterWithBasis } from '../lib/qpa'
+import { withToggle } from '../lib/store'
 import { activeWhatIfs } from '../lib/whatIfs'
-import type { Course, GradeResult, ManualCourse, NeededResult, QpaResult, Settings } from '../types'
+import type { Course, CoursePrefs, GradeResult, ManualCourse, NeededResult, QpaResult, Settings } from '../types'
 import { AddClassDialog } from './AddClassDialog'
 import { LetterChip } from './LetterChip'
-import { rowHint, shownPercent } from './view'
+import { offersPassFail, rowHint, shownLetter, shownPercent, sioRowNote } from './view'
 
 interface Props {
   term: string | null
@@ -16,11 +18,14 @@ interface Props {
   grades: Map<string, GradeResult>
   needed: Map<string, NeededResult[]>
   qpa: QpaResult
+  official?: number | null // SIO's official cumulative QPA, shown next to the projected one
   settings: Settings
   onSettings: (patch: Partial<Settings>) => void
   onOpenClass: (courseKey: string) => void
+  onPrefs: (courseKey: string, change: (p: CoursePrefs) => CoursePrefs) => void // the same path the class page uses
+  onPastSemesters?: () => void // set when SIO has finished semesters to list
   onAddManual: (course: ManualCourse) => void
-  onAskClaude: () => void
+  onAsk: () => void // opens the AI advisor chat
   demo: boolean // sample data from "See a demo" is showing
   onEndDemo: () => void
   onSetup: () => void
@@ -57,9 +62,20 @@ export function Dashboard(p: Props) {
 
   let summaryLine = p.qpa.factorableUnits > 0 ? `Estimated QPA · ${plural(p.qpa.factorableUnits, 'unit')}` : 'Add grades to see your QPA'
   if (p.qpa.cumulativeQpa != null) summaryLine += ` · Cumulative ${formatQpa(p.qpa.cumulativeQpa)}`
+  // SIO's official cumulative (through your last finished semester), next to the projected one.
+  if (p.official != null) {
+    summaryLine += p.qpa.cumulativeQpa != null ? ` · Official ${formatQpa(p.official)}` : ` · Official cumulative ${formatQpa(p.official)}`
+  }
   if (whatIfs) summaryLine += ' · includes what-if scores'
+  // Screen readers say this line when it changes (after a P/F tap, for example), since the big number isn't announced.
+  const spokenQpa =
+    p.qpa.semesterQpa != null ? `QPA ${formatQpa(p.qpa.semesterQpa)}, ${plural(p.qpa.factorableUnits, 'unit')}` : 'No QPA yet'
 
-  function row(c: Course) {
+  // `counted`: the class is in the main list. Those get the P/F button, unless SIO already settled it (offersPassFail).
+  // It works like "Taken pass/fail" on the class page: picking what SIO says clears the setting (withToggle).
+  function row(c: Course, counted: boolean) {
+    const setPassFail = (on: boolean) =>
+      p.onPrefs(c.key, (prefs) => withToggle(prefs, 'passFail', on, c.sio?.gradeOption === 'P'))
     return (
       <li key={c.key}>
         <ClassRow
@@ -67,7 +83,9 @@ export function Dashboard(p: Props) {
           grade={p.grades.get(c.key)}
           needed={p.needed.get(c.key) ?? []}
           settings={p.settings}
+          counts={p.qpa.rows.some((r) => r.courseKey === c.key && r.factorable)}
           onOpen={() => p.onOpenClass(c.key)}
+          onPassFail={counted && offersPassFail(c) ? setPassFail : undefined}
         />
       </li>
     )
@@ -99,11 +117,14 @@ export function Dashboard(p: Props) {
         </h1>
         <p className="qpa-big">{p.qpa.semesterQpa != null ? formatQpa(p.qpa.semesterQpa) : 'No QPA yet'}</p>
         <p className="muted">{summaryLine}</p>
+        <p className="sr-only" aria-live="polite">
+          {spokenQpa}
+        </p>
       </section>
 
       <section aria-label="Classes" ref={listRef}>
         {p.main.length > 0 ? (
-          <ul className="class-list">{p.main.map(row)}</ul>
+          <ul className="class-list">{p.main.map((c) => row(c, true))}</ul>
         ) : (
           <p className="empty-note muted">No classes{p.term ? ` for ${p.term}` : ''} yet.</p>
         )}
@@ -111,7 +132,7 @@ export function Dashboard(p: Props) {
         {p.other.length > 0 && p.settings.showAll && (
           <>
             <p className="muted small list-note">Hidden. These don't count toward your QPA.</p>
-            <ul className="class-list">{p.other.map(row)}</ul>
+            <ul className="class-list">{p.other.map((c) => row(c, false))}</ul>
           </>
         )}
       </section>
@@ -129,11 +150,16 @@ export function Dashboard(p: Props) {
               : `Show ${p.other.length} hidden ${p.other.length === 1 ? 'class' : 'classes'}`}
           </button>
         )}
+        {p.onPastSemesters && (
+          <button type="button" className="link-btn" onClick={p.onPastSemesters}>
+            Past semesters
+          </button>
+        )}
         <button type="button" className="link-btn" onClick={() => setAdding(true)}>
           Add a class by hand
         </button>
-        <button type="button" className="link-btn" onClick={p.onAskClaude}>
-          Ask Claude about my grades
+        <button type="button" className="link-btn" onClick={p.onAsk}>
+          Ask the AI advisor
         </button>
       </div>
 
@@ -147,28 +173,56 @@ interface RowProps {
   grade: GradeResult | undefined
   needed: NeededResult[]
   settings: Settings
+  counts: boolean // the class is in the semester QPA
   onOpen: () => void
+  onPassFail?: (on: boolean) => void // set for main-list classes whose P/F is still open: shows the P/F button
 }
 
-/** One class in the list: number and title on the left, percent and letter on the right. The whole row is a button. */
-function ClassRow({ course, grade, needed, settings, onOpen }: RowProps) {
+/**
+ * One class in the list: number and title on the left, percent and letter on the right. The row is a button that
+ * opens the class. Most classes in the main list also get a small P/F button. It comes after the row button, not
+ * inside it (a button can't hold another button), so the row only opens and P/F only switches pass/fail on or off.
+ */
+function ClassRow({ course, grade, needed, settings, counts, onOpen, onPassFail }: RowProps) {
   const percent = shownPercent(course, grade)
-  const letter = estimatedLetter(course, grade, settings)
-  const hint = rowHint(course, needed, grade, letter, usesWhatIfs(course))
+  const { letter, basis } = letterWithBasis(course, grade, settings)
+  const chip = shownLetter(course, letter, basis) // "P" while the class is pass/fail
+  const passFail = course.prefs.passFail === true
+  // With the final grade posted, "what you need" no longer matters: only the SIO line shows, plus "Pass/fail" when
+  // the class is set to pass/fail anyway (it is then left out of the QPA).
+  const sioNote = sioRowNote(course, basis, counts)
+  const hint = basis === 'sio-final' ? (passFail ? 'Pass/fail' : null) : rowHint(course, needed, grade, letter, usesWhatIfs(course))
+  const lines = [sioNote, hint].filter((line) => line !== null)
 
   return (
-    <button type="button" className="class-row" data-key={course.key} onClick={onOpen}>
-      <span className="class-id">
-        <span className="class-num">{courseLabel(course)}</span>
-        {course.number && <span className="class-title">{course.title}</span>}
-        {hint && <span className="class-hint">{hint}</span>}
-      </span>
-      <span className="class-grade">
-        <span className={percent != null ? 'class-percent' : 'class-percent is-empty'}>
-          {percent != null ? formatGradePercent(percent) : 'No grades'}
+    <div className="class-item">
+      <button type="button" className="class-row" data-key={course.key} onClick={onOpen}>
+        <span className="class-id">
+          <span className="class-num">{courseLabel(course)}</span>
+          {course.number && <span className="class-title">{course.title}</span>}
+          {lines.length > 0 && <span className="class-hint">{lines.join(' · ')}</span>}
         </span>
-        {letter ? <LetterChip letter={letter} /> : <span className="chip chip-n chip-md">?</span>}
-      </span>
-    </button>
+        <span className="class-grade">
+          <span className={percent != null ? 'class-percent' : 'class-percent is-empty'}>
+            {percent != null ? formatGradePercent(percent) : basis === 'sio-final' ? 'Final' : 'No grades'}
+          </span>
+          {chip ? <LetterChip letter={chip} /> : <span className="chip chip-n chip-md">?</span>}
+        </span>
+      </button>
+      {onPassFail && (
+        // A toggle button: aria-pressed tells screen readers whether pass/fail is on. The name starts with the
+        // visible "P/F" so voice control finds it too; the title (shown on hover) says what a click does.
+        <button
+          type="button"
+          className="pf-toggle"
+          aria-pressed={passFail}
+          aria-label={`P/F (pass/fail), ${courseLabel(course)}`}
+          title={passFail ? 'Count the letter grade again' : 'Count this class as pass/fail, left out of your QPA'}
+          onClick={() => onPassFail(!passFail)}
+        >
+          P/F
+        </button>
+      )}
+    </div>
   )
 }

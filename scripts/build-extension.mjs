@@ -2,12 +2,17 @@
 //
 //   dist-extension/            dev build: load it at chrome://extensions with "Load unpacked". Its manifest keeps the
 //                              "key" (so the extension id matches KNOWN_EXTENSION_IDS in extension/protocol.ts) and the
-//                              http://localhost match (so `npm run dev` can talk to it).
+//                              http://localhost match (so `npm run dev` can talk to it). It also honors the website's
+//                              { type: 'reload' } request, so a rebuilt extension can take effect without clicking
+//                              Reload at chrome://extensions.
 //   dist-extension-store/      store build: the same files, but the manifest has no "key" (the Web Store assigns the id)
-//   gradecrunch-extension.zip  and no localhost match. The zip is what gets uploaded to the Chrome Web Store.
+//   gradecrunch-extension.zip  and no localhost match, and the scripts ignore 'reload'. The zip is what gets uploaded to
+//                              the Chrome Web Store.
 //
 // The scripts are bundled with esbuild into plain (classic, non-module) scripts and NOT minified, so Web Store
-// reviewers can read them. Any build error stops the script with a non-zero exit code.
+// reviewers can read them. Each build gets its own bundle because of one build-time switch: __DEV_BUILD__ is true in
+// the dev build and false in the store build (see isDevBuild in extension/src/background.ts). Any build error stops
+// the script with a non-zero exit code.
 //
 // Usage: node scripts/build-extension.mjs
 import { build } from 'esbuild'
@@ -21,42 +26,55 @@ const src = join(root, 'extension')
 const devDir = join(root, 'dist-extension')
 const storeDir = join(root, 'dist-extension-store')
 const zipFile = join(root, 'gradecrunch-extension.zip')
+const SCRIPTS = ['background.js', 'offscreen.js', 'welcome.js']
 
 // Start clean so files deleted from extension/ do not linger in the output.
 rmSync(devDir, { recursive: true, force: true })
 rmSync(storeDir, { recursive: true, force: true })
 rmSync(zipFile, { force: true })
-mkdirSync(devDir, { recursive: true })
 
-// 1. Bundle the three scripts. Each one becomes a single self-contained file (background.js, offscreen.js, welcome.js).
-await build({
-  entryPoints: {
-    background: join(src, 'src/background.ts'),
-    offscreen: join(src, 'src/offscreen.ts'),
-    welcome: join(src, 'src/welcome.ts'),
-  },
-  outdir: devDir,
-  bundle: true,
-  format: 'iife', // a classic script: service workers declared without "type": "module" cannot use import/export
-  target: 'chrome116', // matches minimum_chrome_version in the manifest
-  platform: 'browser',
-  minify: false, // readable code makes Web Store review faster
-  charset: 'utf8',
-  logLevel: 'warning',
-})
+/** Bundle the three scripts into `outDir` and copy the static files next to them. */
+async function buildInto(outDir, devBuild) {
+  mkdirSync(outDir, { recursive: true })
+  // 1. Each script becomes a single self-contained file (background.js, offscreen.js, welcome.js).
+  await build({
+    entryPoints: {
+      background: join(src, 'src/background.ts'),
+      offscreen: join(src, 'src/offscreen.ts'),
+      welcome: join(src, 'src/welcome.ts'),
+    },
+    outdir: outDir,
+    bundle: true,
+    format: 'iife', // a classic script: service workers declared without "type": "module" cannot use import/export
+    target: 'chrome116', // matches minimum_chrome_version in the manifest
+    platform: 'browser',
+    minify: false, // readable code makes Web Store review faster
+    charset: 'utf8',
+    logLevel: 'warning',
+    define: { __DEV_BUILD__: String(devBuild) },
+  })
 
-// MV3 forbids eval and other ways of running code from strings. Catch it here instead of in review.
-for (const name of ['background.js', 'offscreen.js', 'welcome.js']) {
-  const code = readFileSync(join(devDir, name), 'utf8')
-  if (/\beval\(|new Function\(/.test(code)) {
-    console.error(`${name} contains eval or new Function, which Manifest V3 does not allow.`)
-    process.exit(1)
+  for (const name of SCRIPTS) {
+    const code = readFileSync(join(outDir, name), 'utf8')
+    // MV3 forbids eval and other ways of running code from strings. Catch it here instead of in review.
+    if (/\beval\(|new Function\(/.test(code)) {
+      console.error(`${name} contains eval or new Function, which Manifest V3 does not allow.`)
+      process.exit(1)
+    }
+    // The switch must be filled in, or the 'reload' request would silently stay off in the dev build.
+    if (code.includes('__DEV_BUILD__')) {
+      console.error(`${name} still mentions __DEV_BUILD__: the build-time switch was not applied.`)
+      process.exit(1)
+    }
   }
+
+  // 2. Copy the static files.
+  for (const file of ['offscreen.html', 'welcome.html', 'welcome.css']) cpSync(join(src, file), join(outDir, file))
+  cpSync(join(src, 'icons'), join(outDir, 'icons'), { recursive: true })
 }
 
-// 2. Copy the static files.
-for (const file of ['offscreen.html', 'welcome.html', 'welcome.css']) cpSync(join(src, file), join(devDir, file))
-cpSync(join(src, 'icons'), join(devDir, 'icons'), { recursive: true })
+await buildInto(devDir, true)
+await buildInto(storeDir, false)
 
 // 3. Manifests. The dev one is the source file as-is.
 const manifest = JSON.parse(readFileSync(join(src, 'manifest.json'), 'utf8'))
@@ -67,12 +85,10 @@ delete storeManifest.key
 storeManifest.externally_connectable.matches = storeManifest.externally_connectable.matches.filter(
   (pattern) => !/^https?:\/\/(localhost|127\.0\.0\.1)[:/]/.test(pattern),
 )
-
-// 4. Store build = dev build with the store manifest, then zipped.
-cpSync(devDir, storeDir, { recursive: true })
 writeFileSync(join(storeDir, 'manifest.json'), JSON.stringify(storeManifest, null, 2) + '\n')
-// The system zip tool (built into macOS and most Linux setups) keeps this script free of extra dependencies.
-// -X leaves out macOS extra attributes; running inside storeDir puts manifest.json at the zip's top level.
+
+// 4. Zip the store build. The system zip tool (built into macOS and most Linux setups) keeps this script free of extra
+// dependencies. -X leaves out macOS extra attributes; running inside storeDir puts manifest.json at the zip's top level.
 execFileSync('zip', ['-r', '-X', '-q', zipFile, '.'], { cwd: storeDir, stdio: 'inherit' })
 
 const files = readdirSync(devDir, { recursive: true }).filter((f) => !String(f).endsWith('icons'))

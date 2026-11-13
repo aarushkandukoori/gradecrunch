@@ -1,4 +1,4 @@
-// Bundles bookmarklet/main.ts (plus the Canvas/Gradescope/Autolab sync code it imports) into one small
+// Bundles bookmarklet/main.ts (plus the Canvas/Gradescope/Autolab/SIO sync code it imports) into one small
 // minified script and writes it to src/generated/bookmarklet.ts, where the app reads it to build
 // the draggable "Sync grades" link. Runs before every `npm run dev` / `npm run build`.
 //

@@ -1,9 +1,11 @@
 // Settings: level, theme, QPA extras (college, cumulative QPA, Dean's List), the extension's Autolab switch,
-// export / import / delete everything.
+// what the AI advisor remembers, export / import / delete everything.
 import { useState, type ChangeEvent } from 'react'
 import { APP_SLUG } from '../lib/brand'
+import type { Note } from '../lib/chat/memory'
 import { exportStoreJson, parseStore, type Theme } from '../lib/store'
-import type { QpaResult, Settings, Store } from '../types'
+import type { Level, QpaResult, Settings, Store } from '../types'
+import { MemoryList } from './MemoryList'
 import { Modal } from './Modal'
 import { QpaExtras } from './QpaExtras'
 import { TrashIcon, WarningIcon } from './icons'
@@ -19,8 +21,12 @@ interface Props {
   onDeleteAll: () => void
   qpa: QpaResult
   newestTerm: boolean
+  sioPrior?: { qpa: number; units: number } | null // QPA and factorable units before this semester, from SIO
+  sioLevel?: { term: string; level: Level } | null // SIO puts the term on screen in the other record than Level says
   // Only when the Chrome extension is installed: whether its sync also reads Autolab (beta).
   autolab?: { on: boolean; onChange: (on: boolean) => void }
+  notes: Note[] // what the AI advisor remembers about the student
+  onNotesChange: (notes: Note[]) => void
 }
 
 const THEMES: { value: Theme; label: string }[] = [
@@ -80,6 +86,12 @@ export function SettingsDialog(p: Props) {
             ))}
           </div>
           <p className="muted small">Undergrad final grades have no plus or minus. Grad grades do (A- = 3.67).</p>
+          {p.sioLevel && (
+            <p className="muted small">
+              SIO lists {p.sioLevel.term} in your {p.sioLevel.level === 'grad' ? 'graduate' : 'undergraduate'} record, so{' '}
+              {p.sioLevel.term} uses the {p.sioLevel.level === 'grad' ? 'graduate' : 'undergraduate'} scale.
+            </p>
+          )}
         </fieldset>
 
         <fieldset className="seg-field">
@@ -94,7 +106,7 @@ export function SettingsDialog(p: Props) {
           </div>
         </fieldset>
 
-        <QpaExtras qpa={p.qpa} settings={s} onSettings={p.onSettings} newestTerm={p.newestTerm} />
+        <QpaExtras qpa={p.qpa} settings={s} onSettings={p.onSettings} newestTerm={p.newestTerm} sioPrior={p.sioPrior} />
 
         {p.autolab && (
           <div className="settings-block">
@@ -107,9 +119,13 @@ export function SettingsDialog(p: Props) {
           </div>
         )}
 
+        <MemoryList notes={p.notes} onChange={p.onNotesChange} />
+
         <div className="settings-block">
           <h3>Your data</h3>
-          <p className="muted small">Everything lives in this browser only. Export it to move to another computer.</p>
+          <p className="muted small">
+            Everything lives in this browser only. Export your grades and settings to move them to another computer.
+          </p>
           <div className="btn-row">
             <button type="button" className="btn btn-secondary btn-sm" onClick={() => downloadStore(p.store)}>
               Export data
@@ -130,7 +146,7 @@ export function SettingsDialog(p: Props) {
           <button type="button" className="btn btn-danger-ghost btn-sm" onClick={p.onDeleteAll}>
             <TrashIcon size={14} /> Delete everything
           </button>
-          <p className="muted small">Removes your grades and settings from this browser.</p>
+          <p className="muted small">Removes your grades, settings and the AI advisor's chat and notes from this browser.</p>
         </div>
       </div>
     </Modal>

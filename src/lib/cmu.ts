@@ -84,7 +84,7 @@ export interface College {
 }
 
 // Dean's List table from the 2026-27 catalog (research section E). All colleges also require
-// no Incompletes that semester; the app cannot see Incompletes, so it does not check that.
+// no Incompletes that semester; the app sees those only in SIO (a final grade of I), and computeQpa checks for them.
 export const COLLEGES: College[] = [
   {
     key: 'cit',

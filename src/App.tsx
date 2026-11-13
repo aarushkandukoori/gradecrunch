@@ -1,25 +1,30 @@
 // The whole app. It owns the saved store, turns it into courses + grades + QPA, picks which page to show
-// (home / one class / setup / privacy, mirrored in the URL), and handles syncing: the Sync bookmarklet opens this site at
+// (home / one class / past semesters / setup / privacy, mirrored in the URL), and handles syncing: the Sync bookmarklet opens this site at
 // /#receive and hands the grades over by postMessage (see ui/receive.ts), or, when a popup blocker gets in the
 // way, sends them in a #sync= link that we read once on load. With the GradeCrunch Chrome extension installed, the
 // Sync button asks the extension instead (see lib/extension.ts), and the app syncs by itself on load when the last
-// sync is more than 10 minutes old. Every sync can be undone from its toast.
+// sync is more than 10 minutes old. Every sync can be undone from its toast. The AI advisor button opens the AI chat
+// (ui/ChatPanel.tsx); the notes the AI advisor remembers live here too, so Settings can show and edit them.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { buildClaudePrompt } from './lib/askClaude'
 import { catalogReady, loadCatalog } from './lib/catalog'
+import { CHAT_KEY, clearChatData, loadNotes, MEMORY_KEY, saveChat, saveNotes, type Note } from './lib/chat/memory'
 import { demoPayloads } from './lib/demo'
 import { BOOKMARKLET_VERSION, parseSyncFragment, RECEIVE_HASH } from './lib/bookmarklet'
-import { plural } from './lib/format'
+import { courseLabel, plural } from './lib/format'
 import { gradeCourse, neededForLetters } from './lib/grade'
 import { buildCourses, rekeyPrefs, termsOf } from './lib/merge'
 import {
   browserExtension,
   getAutolabSetting,
   loginSources,
+  markReloadTried,
   mergeNotes,
   needsAutoSync,
+  needsReload,
   pickSources,
+  reloadTried,
   setAutolabSetting,
+  supportedSources,
   type ExtensionClient,
   type ExtensionInfo,
   type ExtSource,
@@ -27,6 +32,7 @@ import {
 } from './lib/extension'
 import { decodePayload, validatePayload } from './lib/payload'
 import { computeQpa } from './lib/qpa'
+import { finishedSemesters, levelFor, officialCumulative, priorFromSio, withSioPrior } from './lib/sio'
 import { payloadHasPdfs, pdfsToText } from './lib/syllabus'
 import {
   addManualCourse,
@@ -46,13 +52,14 @@ import {
   type Theme,
 } from './lib/store'
 import type { Course, CoursePrefs, ManualCourse, NeededResult, Settings, Store, SyncPayload } from './types'
-import { ClaudeDialog } from './ui/ClaudeDialog'
+import { ChatPanel } from './ui/ChatPanel'
 import { ClassView } from './ui/ClassView'
 import { Dashboard, type ReturnTo } from './ui/Dashboard'
 import { FinishSetup, SyncNotes, type ExtensionView } from './ui/ExtensionBits'
 import { Footer } from './ui/Footer'
 import { Header } from './ui/Header'
 import { classKeyFromPath, classPath, VIEW_PATHS, viewFromPath, type View } from './ui/Link'
+import { PastSemesters } from './ui/PastSemesters'
 import { PrivacyPage } from './ui/PrivacyPage'
 import { SettingsDialog } from './ui/SettingsDialog'
 import { Toasts, useToasts } from './ui/Toasts'
@@ -60,8 +67,8 @@ import { Welcome } from './ui/Welcome'
 import { browserReceiverDeps, startReceiver, syncLinkIsStale } from './ui/receive'
 import { EMPTY_GRADE, isManualOnly, neededFor, pickTerm, splitCourses, termsWithGrades } from './ui/view'
 
-const CLAUDE_URL = 'https://claude.ai/new'
-const SOURCE_NAMES: Record<SyncPayload['kind'], string> = { canvas: 'Canvas', gradescope: 'Gradescope', autolab: 'Autolab' }
+const RELOAD_WAIT_MS = 1500 // how long the dev extension gets to restart after a reload
+const SOURCE_NAMES: Record<SyncPayload['kind'], string> = { canvas: 'Canvas', gradescope: 'Gradescope', autolab: 'Autolab', sio: 'SIO' }
 
 interface AppProps {
   extension?: ExtensionClient // the Chrome extension client; tests pass a fake one
@@ -69,6 +76,7 @@ interface AppProps {
 
 export default function App({ extension = browserExtension }: AppProps) {
   const [store, setStore] = useState<Store>(loadStore)
+  const storeRef = useRef(store) // the latest store, for callbacks that must not change every time it does
   const [view, setView] = useState<View>(() => viewFromPath(window.location.pathname))
   // The class open at /class/<key>, or null on any other page.
   const [classKey, setClassKey] = useState<string | null>(() => classKeyFromPath(window.location.pathname))
@@ -77,7 +85,11 @@ export default function App({ extension = browserExtension }: AppProps) {
   const [theme, setThemeState] = useState<Theme>(getTheme)
   const [now, setNow] = useState(() => Date.now())
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [claudeText, setClaudeText] = useState<string | null>(null)
+  // The AI advisor chat: open or not, and the class it was opened from (its question box then starts with that class).
+  const [chatOpen, setChatOpen] = useState(false)
+  const [chatTopic, setChatTopic] = useState<string | null>(null)
+  const [chatKey, setChatKey] = useState(0) // a new key starts the chat over (when another tab removed the chat)
+  const [memory, setMemory] = useState<Note[]>(loadNotes) // what the AI advisor remembers about the student
   const { toasts, push: toast, dismiss } = useToasts()
   // The course catalog (titles + units) loads in the background; bump this when it arrives to recompute.
   const [catalogLoaded, setCatalogLoaded] = useState(catalogReady)
@@ -92,6 +104,7 @@ export default function App({ extension = browserExtension }: AppProps) {
   const skipNextSave = useRef(false) // the store just came from another tab: no need to write it back
 
   useEffect(() => {
+    storeRef.current = store
     if (skipNextSave.current) {
       skipNextSave.current = false
       return
@@ -112,6 +125,10 @@ export default function App({ extension = browserExtension }: AppProps) {
     // that delay the event while a tab is in the background.
     const onStorage = (e: StorageEvent) => {
       if (e.key === STORE_KEY || e.key === null) reloadIfChanged() // null = storage cleared ("Delete everything")
+      // The AI advisor's notes and chat, the same way: take the other tab's notes, and when it removed the chat
+      // ("Delete everything" or Clear chat), start this tab's chat over too, so this tab never saves its old copy back.
+      if (e.key === MEMORY_KEY || e.key === null) setMemory(loadNotes())
+      if ((e.key === CHAT_KEY && e.newValue === null) || e.key === null) setChatKey((k) => k + 1)
     }
     const onVisible = () => {
       if (document.visibilityState === 'visible') reloadIfChanged()
@@ -180,28 +197,37 @@ export default function App({ extension = browserExtension }: AppProps) {
   // Default to the newest term that has grades, not next semester's empty courses that appear in November.
   const gradedTerms = useMemo(() => termsWithGrades(courses, grades), [courses, grades])
   const term = pickTerm(terms, store.settings.term, gradedTerms)
-  // "Cumulative after this semester" only for the newest term: the SIO QPA the student typed already counts
-  // older terms, so adding an older term again would count it twice.
+  // "Cumulative after this semester": the QPA before this semester comes from SIO (only the semesters before the one
+  // shown, so any term works), unless the student typed their own in Settings. A typed one already counts every
+  // older term, so with it the cumulative only shows for the newest term (an older one would be counted twice).
   const newestTerm = terms.length === 0 || term === terms[0]
+  // The settings for the term on screen (sio.ts withSioPrior): the level of the record SIO puts the term in
+  // (undergraduate or graduate scale), and the QPA before this semester from SIO unless the student typed it.
+  const sioPrior = useMemo(() => withSioPrior(store.settings, store.sio, term), [store.settings, store.sio, term])
+  const termSettings = sioPrior.settings
+  const official = officialCumulative(store.sio, termSettings.level)
+  const hasPast = finishedSemesters(store.sio).length > 0
   const { main, other } = useMemo(() => splitCourses(courses, term), [courses, term])
   // "What do I need" runs the grade math many times per course, so only do it for courses on screen.
   const needed = useMemo(() => {
     const map = new Map<string, NeededResult[]>()
     const compute = (c: Course) => neededForLetters(c, c.prefs.whatIf ?? {})
-    for (const c of [...main, ...other]) map.set(c.key, neededFor(c, compute, store.settings.level))
+    for (const c of [...main, ...other]) map.set(c.key, neededFor(c, compute, termSettings.level))
     return map
-  }, [main, other, store.settings.level])
+  }, [main, other, termSettings.level])
   const qpa = useMemo(
-    () => computeQpa(main, grades, store.settings, { includeCumulative: newestTerm }),
-    [main, grades, store.settings, newestTerm],
+    () => computeQpa(main, grades, sioPrior.settings, { includeCumulative: newestTerm || sioPrior.fromSio }),
+    [main, grades, sioPrior, newestTerm],
   )
-  const hasData = Object.keys(store.synced).length > 0 || store.manual.length > 0
+  const hasData = Object.keys(store.synced).length > 0 || store.manual.length > 0 || (store.sio?.semesters.length ?? 0) > 0
   const openCourse = classKey ? courses.find((c) => c.key === classKey) : undefined
+  // The class page uses the record of the class's own term (it can be from another term than the one on screen).
+  const openLevel = levelFor(store.sio, openCourse?.term ?? null, store.settings.level)
   const openNeeded = useMemo(() => {
     if (!openCourse) return []
     // A class from another term is not in `needed` (that only covers the classes on screen), so compute it here.
-    return needed.get(openCourse.key) ?? neededFor(openCourse, (c) => neededForLetters(c, c.prefs.whatIf ?? {}), store.settings.level)
-  }, [openCourse, needed, store.settings.level])
+    return needed.get(openCourse.key) ?? neededFor(openCourse, (c) => neededForLetters(c, c.prefs.whatIf ?? {}), openLevel)
+  }, [openCourse, needed, openLevel])
 
   // A /class/ link to a class that isn't here (an old link, or it was just removed): show the class list instead.
   useEffect(() => {
@@ -233,6 +259,29 @@ export default function App({ extension = browserExtension }: AppProps) {
     [toast],
   )
   const removeManual = useCallback((key: string) => setStore((s) => removeManualCourse(s, key)), [])
+
+  // The AI advisor: open the chat (from a class page, `topic` is that class, e.g. "15-122"), and save its notes.
+  const openChat = useCallback((topic: string | null = null) => {
+    setChatTopic(topic)
+    setChatOpen(true)
+  }, [])
+  const changeMemory = useCallback((next: Note[]) => {
+    setMemory(next)
+    saveNotes(next)
+  }, [])
+
+  // The AI advisor's chat and notes from "See a demo" are about the made-up grades: forget them once the sample data
+  // is gone, however it went (Clear sample data, a real sync, an import). Consent stays. The new chatKey starts the chat
+  // over, so the sheet neither keeps its old copy nor finishes a question about the demo.
+  const wasDemo = useRef(store.demo === true)
+  useEffect(() => {
+    if (wasDemo.current && !store.demo) {
+      saveChat([])
+      changeMemory([])
+      setChatKey((k) => k + 1)
+    }
+    wasDemo.current = store.demo === true
+  }, [store.demo, changeMemory])
 
   // "See a demo": load made-up grades so people can try everything before adding the Sync button.
   const startDemo = useCallback(() => {
@@ -273,7 +322,8 @@ export default function App({ extension = browserExtension }: AppProps) {
     (payload: SyncPayload) => {
       const source = SOURCE_NAMES[payload.kind]
       const n = payload.warnings.length
-      replaceWithUndo((s) => applyPayload(s, payload), `Synced ${plural(payload.courses.length, 'course')} from ${source}`, {
+      const what = payload.kind === 'sio' ? plural(payload.semesters?.length ?? 0, 'semester') : plural(payload.courses.length, 'course')
+      replaceWithUndo((s) => applyPayload(s, payload), `Synced ${what} from ${source}`, {
         details: n > 0 ? payload.warnings : undefined,
         detailsLabel: plural(n, 'warning'),
       })
@@ -371,11 +421,9 @@ export default function App({ extension = browserExtension }: AppProps) {
   const [autolabOn, setAutolabOn] = useState(getAutolabSetting)
   const syncingRef = useRef(false) // a ref too, so a focus event during a sync can't start a second one
   const notesRef = useRef(notes)
-  const storeRef = useRef(store)
   useEffect(() => {
     notesRef.current = notes
-    storeRef.current = store
-  }, [notes, store])
+  }, [notes])
 
   /** Asks the extension for these sites and applies what comes back, one Undo toast per site. */
   const runExtensionSync = useCallback(
@@ -419,12 +467,15 @@ export default function App({ extension = browserExtension }: AppProps) {
     [extension, applySync],
   )
 
-  /** Canvas + Gradescope, plus Autolab when it has data here or the setting is on. */
-  const sourcesToSync = useCallback((): ExtSource[] => {
-    const s = storeRef.current
-    const hasAutolab = Boolean(s.lastSync.autolab) || Object.values(s.synced).some((c) => c.source === 'autolab')
-    return pickSources(hasAutolab, autolabOn)
-  }, [autolabOn])
+  /** Canvas + Gradescope + SIO, plus Autolab when it has data here or the setting is on (what the extension can do). */
+  const sourcesToSync = useCallback(
+    (info: ExtensionInfo): ExtSource[] => {
+      const s = storeRef.current
+      const hasAutolab = Boolean(s.lastSync.autolab) || Object.values(s.synced).some((c) => c.source === 'autolab')
+      return pickSources(hasAutolab, autolabOn, supportedSources(info))
+    },
+    [autolabOn],
+  )
 
   const openWelcome = useCallback(
     (info: ExtensionInfo) => {
@@ -438,10 +489,20 @@ export default function App({ extension = browserExtension }: AppProps) {
   useEffect(() => {
     if (detectStartedRef.current) return
     detectStartedRef.current = true
-    extension
-      .detect()
-      .then((info) => info && setExt(info))
-      .catch(() => {}) // no extension: the bookmarklet keeps working
+    async function detect() {
+      let info = await extension.detect()
+      // The unpacked dev build was rebuilt but still runs its old code: reload it once, then look again. Only once per
+      // version in this tab: if the reload didn't help (the files on disk are that old too), asking on every page load
+      // would just restart the extension each time.
+      if (info && needsReload(info) && extension.reload && !reloadTried(info.version)) {
+        markReloadTried(info.version)
+        await extension.reload(info.id).catch(() => {})
+        await new Promise((resolve) => setTimeout(resolve, RELOAD_WAIT_MS))
+        info = (await extension.detect().catch(() => null)) ?? info
+      }
+      if (info) setExt(info)
+    }
+    detect().catch(() => {}) // no extension: the bookmarklet keeps working
   }, [extension])
 
   // Sync by itself once, as soon as the extension is ready (on load, or right after its welcome page is done),
@@ -451,7 +512,7 @@ export default function App({ extension = browserExtension }: AppProps) {
     if (!ext?.consent || autoSyncedRef.current) return
     autoSyncedRef.current = true
     const s = storeRef.current
-    if (!s.demo && needsAutoSync(s.lastSync, Date.now())) void runExtensionSync(ext, sourcesToSync())
+    if (!s.demo && needsAutoSync(s.lastSync, Date.now())) void runExtensionSync(ext, sourcesToSync(ext))
   }, [ext, runExtensionSync, sourcesToSync])
 
   // Coming back to this tab: after logging in to a site in another tab, re-sync just the sites that needed it.
@@ -484,7 +545,7 @@ export default function App({ extension = browserExtension }: AppProps) {
     syncing: extSyncing,
     progress: extProgress,
     notes,
-    onSync: () => void runExtensionSync(ext, sourcesToSync()),
+    onSync: () => void runExtensionSync(ext, sourcesToSync(ext)),
     onOpenWelcome: () => openWelcome(ext),
   }
 
@@ -502,26 +563,17 @@ export default function App({ extension = browserExtension }: AppProps) {
   }
 
   function deleteAll() {
-    if (!window.confirm('Delete all your grades and settings from this browser? This cannot be undone.')) return
+    if (!window.confirm("Delete all your grades, settings and the AI advisor's chat and notes from this browser? This cannot be undone.")) return
+    clearChatData() // the AI advisor's chat, notes and consent (clearAll below also removes every GradeCrunch key)
     clearAll()
     window.location.reload()
-  }
-
-  async function askClaude() {
-    const text = buildClaudePrompt(main, grades, needed, qpa, store.settings)
-    try {
-      await navigator.clipboard.writeText(text)
-      window.open(CLAUDE_URL, '_blank', 'noopener,noreferrer')
-      toast('Copied your grade summary. Paste it into Claude.')
-    } catch {
-      setClaudeText(text) // clipboard blocked: show it so they can copy by hand
-    }
   }
 
   // ------------------------------------------------------------ page
 
   let page
   if (view === 'privacy') page = <PrivacyPage />
+  else if (view === 'past') page = <PastSemesters sio={store.sio} level={store.settings.level} onBack={() => navigate('home')} />
   else if (view === 'setup' || !hasData) {
     page = (
       <Welcome
@@ -542,10 +594,11 @@ export default function App({ extension = browserExtension }: AppProps) {
         course={openCourse}
         grade={grades.get(key) ?? EMPTY_GRADE}
         needed={openNeeded}
-        settings={store.settings}
+        settings={{ ...store.settings, level: openLevel }}
         qpaRow={qpa.rows.find((r) => r.courseKey === key)}
         onBack={() => navigate('home')}
         onPrefs={(change) => changePrefs(key, change)}
+        onAsk={() => openChat(courseLabel(openCourse))}
         onRemove={
           isManualOnly(openCourse)
             ? () => {
@@ -565,17 +618,24 @@ export default function App({ extension = browserExtension }: AppProps) {
         grades={grades}
         needed={needed}
         qpa={qpa}
-        settings={store.settings}
+        official={official}
+        settings={termSettings}
         onSettings={changeSettings}
         onOpenClass={openClass}
+        onPrefs={changePrefs}
+        onPastSemesters={hasPast ? () => navigate('past') : undefined}
         onAddManual={addManual}
-        onAskClaude={askClaude}
+        onAsk={() => openChat()}
         demo={store.demo === true}
         onEndDemo={endDemo}
         onSetup={() => navigate('setup')}
         returnTo={returnTo}
         notice={
-          extView && !extView.consent ? <FinishSetup onOpenWelcome={extView.onOpenWelcome} /> : <SyncNotes notes={notes} />
+          extView && !extView.consent ? (
+            <FinishSetup onOpenWelcome={extView.onOpenWelcome} />
+          ) : (
+            <SyncNotes notes={notes} sioSaved={store.sio !== undefined} />
+          )
         }
       />
     )
@@ -595,6 +655,7 @@ export default function App({ extension = browserExtension }: AppProps) {
         lastSync={store.lastSync}
         now={now}
         onOpenSettings={() => setSettingsOpen(true)}
+        onAsk={hasData ? () => openChat() : undefined}
         extSync={
           extView
             ? {
@@ -621,9 +682,24 @@ export default function App({ extension = browserExtension }: AppProps) {
         onDeleteAll={deleteAll}
         qpa={qpa}
         newestTerm={newestTerm}
+        sioPrior={priorFromSio(store.sio, term, termSettings.level)}
+        sioLevel={term && termSettings.level !== store.settings.level ? { term, level: termSettings.level } : null}
         autolab={ext ? { on: autolabOn, onChange: changeAutolab } : undefined}
+        notes={memory}
+        onNotesChange={changeMemory}
       />
-      <ClaudeDialog text={claudeText} onClose={() => setClaudeText(null)} />
+      {/* Always mounted: it keeps its own chat and opens or closes with `open`. Tool changes and Undo go through
+          setStore, so they are saved (and reach other tabs) like any other change. */}
+      <ChatPanel
+        key={chatKey}
+        open={chatOpen}
+        topic={chatTopic}
+        onClose={() => setChatOpen(false)}
+        store={store}
+        onStoreChange={setStore}
+        notes={memory}
+        onNotesChange={changeMemory}
+      />
       <Toasts toasts={toasts} onDismiss={dismiss} />
     </>
   )

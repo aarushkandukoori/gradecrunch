@@ -1,6 +1,6 @@
 // How grades get from the Sync button into this app.
 //
-// Main path (postMessage): the bookmarklet, running on Canvas / Gradescope / Autolab, opens this site at
+// Main path (postMessage): the bookmarklet, running on Canvas / Gradescope / Autolab / SIO, opens this site at
 // /#receive in a new tab. This tab says "ready" to the tab that opened it (window.opener), the bookmarklet
 // answers with the grades, and we reply "done". The grades never appear in a URL, so they never land in
 // browser history. The message names live in bookmarklet/protocol.ts, shared with the bookmarklet.
@@ -18,6 +18,7 @@ export const SYNC_ORIGINS: Record<string, SyncPayload['kind']> = {
   'https://www.gradescope.com': 'gradescope',
   'https://gradescope.com': 'gradescope',
   'https://autolab.andrew.cmu.edu': 'autolab',
+  'https://s3.andrew.cmu.edu': 'sio',
 }
 
 export const READY_EVERY_MS = 250 // how often we say "ready" until the grades arrive

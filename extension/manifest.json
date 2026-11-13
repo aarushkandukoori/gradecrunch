@@ -2,14 +2,19 @@
   "manifest_version": 3,
   "name": "GradeCrunch: Grades and QPA",
   "short_name": "GradeCrunch",
-  "version": "1.0.0",
-  "description": "All your grades and QPA in one place. Reads your Canvas, Gradescope and Autolab grades in your browser. Nothing goes to a server.",
+  "version": "1.1.0",
+  "description": "All your CMU grades and QPA in one place. Reads Canvas, Gradescope, Autolab and SIO in your browser. No accounts, no tracking.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAy24AeqSGx1uSGfDQSZpk2x3OS3cik6tBt2vbeYmCWSBpbG8vL1VKmebbqZhASbRl2eaVvXqmpiKdVzdU2q9cYjpTK3tNYiYgjpS85mKO5d5yW2kK2AUYBx3kYOUeF6EC3RaX5qaTmycFbIie0/NMSpA6iPjLJPf6Cf2YKQF2yA9YIw/6Pwl2FvYAWtv9kTZ68VLWHAnC7zC1bLEt4nM7aSvEZQxprhqEsY55u1lfngLM+EzhJYjPDY+OPA24HgJSCr6x0pSQddRmfLQU4EqzXqkTf+j+uigcxBGVlqx7maqCsLoZi72p9LTozPrMM6uroT8Cp8HIhCmmUnmng1h47wIDAQAB",
   "icons": { "16": "icons/icon16.png", "32": "icons/icon32.png", "48": "icons/icon48.png", "128": "icons/icon128.png" },
   "action": { "default_title": "Open GradeCrunch", "default_icon": { "16": "icons/icon16.png", "32": "icons/icon32.png" } },
   "background": { "service_worker": "background.js" },
   "permissions": ["storage", "offscreen"],
-  "host_permissions": ["https://canvas.cmu.edu/*", "https://www.gradescope.com/*", "https://autolab.andrew.cmu.edu/*"],
+  "host_permissions": [
+    "https://canvas.cmu.edu/*",
+    "https://www.gradescope.com/*",
+    "https://autolab.andrew.cmu.edu/*",
+    "https://s3.andrew.cmu.edu/*"
+  ],
   "optional_host_permissions": ["https://*.inscloudgate.net/*"],
   "externally_connectable": {
     "matches": ["https://grades.aarushkandukoori.com/*", "https://gradecrunch.pages.dev/*", "http://localhost/*"]

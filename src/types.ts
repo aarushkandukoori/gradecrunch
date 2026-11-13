@@ -1,6 +1,7 @@
 // Shared data types. Every module (sync, merge, grade math, UI) talks in these shapes.
 //
 // Flow:  Canvas / Gradescope  --sync-->  SyncPayload (list of SyncedCourse)
+//        SIO                  --sync-->  SyncPayload (list of SioSemester: official units, grade option, grades, QPA)
 //        stored in the browser  --merge with user prefs-->  Course[]
 //        Course  --grade math-->  GradeResult, NeededResult[], QPA
 
@@ -76,11 +77,55 @@ export interface SyncedCourse {
 /** What the bookmarklet (or token sync) hands to the app. */
 export interface SyncPayload {
   v: 1
-  kind: 'canvas' | 'gradescope' | 'autolab'
+  kind: 'canvas' | 'gradescope' | 'autolab' | 'sio'
   at: string // ISO time
-  courses: SyncedCourse[]
+  courses: SyncedCourse[] // always empty for 'sio'
+  semesters?: SioSemester[] // 'sio' only: every semester SIO showed
   warnings: string[] // human-readable problems that did not stop the sync
-  failedIds?: string[] // sourceIds of courses whose details could not be read: keep the previously stored copy
+  failedIds?: string[] // sourceIds of courses (SIO: semester codes) that could not be read: keep the stored copy
+}
+
+// ---------------------------------------------------------------- SIO (CMU's official record)
+
+/** One course on an SIO "Grades and QPA" page. */
+export interface SioCourse {
+  title: string // "Matrices and Linear Transformations"
+  number: string | null // "21241" (5 digits, no dash); null when SIO shows something we can't read
+  alsoNumbers: string[] // more numbers written in the same cell, e.g. ["10615"] for "10-335/615"
+  section: string | null // "F"
+  gradeOption: string | null // "L" letter grade, "P" pass/no pass, "A" audit, ...
+  units: number | null // 9, 12, 4.5
+  midGrade: string | null // mid-semester grade, e.g. "B+"; null when SIO shows NA
+  finalGrade: string | null // "A", "P", "W", ...; null until it is posted
+}
+
+/** The QPA row under one semester. null = SIO shows nothing there yet (no final grades, no mid-semester grades). */
+export interface SioQpa {
+  midSemQpa: number | null
+  unitsCarried: number | null
+  unitsPassed: number | null
+  factorableUnits: number | null
+  qualityPoints: number | null
+  finalQpa: number | null // the semester QPA
+  cumulativeQpa: number | null // the official cumulative QPA SIO shows with this semester
+}
+
+/** One semester from SIO's semester picker. */
+export interface SioSemester {
+  code: string // "F26"
+  term: string // the picker's label, e.g. "Fall 2026"
+  level: Level // the picker group it sits in: UNDERGRADUATE or GRADUATE (separate records, separate cumulatives)
+  courses: SioCourse[]
+  qpa: SioQpa
+}
+
+/** What the store keeps from the last good SIO sync. */
+export interface SioData {
+  semesters: SioSemester[] // newest first
+  syncedAt: string // ISO time of that sync
+  // Codes of semesters SIO listed that the last sync couldn't read and that we have no stored copy of. While any are
+  // missing, "QPA before this semester" is not added up from SIO (it would leave a semester out).
+  unread?: string[]
 }
 
 // ---------------------------------------------------------------- user preferences
@@ -138,7 +183,8 @@ export interface Store {
   manual: ManualCourse[]
   prefs: Record<string, CoursePrefs> // key = Course.key
   settings: Settings
-  lastSync: { canvas?: string; gradescope?: string; autolab?: string }
+  lastSync: { canvas?: string; gradescope?: string; autolab?: string; sio?: string }
+  sio?: SioData // the last good SIO sync (missing in stores saved before SIO support)
   demo?: boolean // true while the sample data from "See a demo" is loaded
 }
 
@@ -180,6 +226,15 @@ export interface CourseSourceRef {
   syncedAt: string
 }
 
+/** What SIO says about one class. Only set for classes in a term SIO has. */
+export interface CourseSio {
+  registered: boolean // false: SIO lists this term but not this class (you dropped it, or never took it)
+  units: number | null // exact units
+  gradeOption: string | null // "L" letter, "P" pass/fail, ...
+  midGrade: string | null // e.g. "B+"
+  finalGrade: string | null // once posted
+}
+
 export interface Course {
   key: string // `${term}|${number}` when a number is known, else `${source}:${sourceId}`
   number: string | null
@@ -196,11 +251,14 @@ export interface Course {
   scheme: GradeCut[] // effective cutoffs, sorted by min descending
   schemeSource: 'canvas' | 'custom' | 'default'
   units: number
-  unitsSource: 'catalog' | 'custom' | 'default'
+  unitsSource: 'catalog' | 'custom' | 'default' | 'sio'
   manualPercent: number | null // from a ManualCourse
+  // The student's prefs (item keys renamed to the current ones), plus what SIO implies when the student set nothing:
+  // passFail true for grade option "P", hidden true for a class SIO doesn't list. An explicit false always wins.
   prefs: CoursePrefs
   weightNote?: string | null // why the weights differ from Canvas, e.g. "Using syllabus weights; Canvas isn't weighted"
   syllabusUsed?: { name: string; url: string | null } | null // the syllabus document the weights came from
+  sio?: CourseSio | null // set when SIO has this class's term
 }
 
 // ---------------------------------------------------------------- grade math results
@@ -234,6 +292,13 @@ export interface NeededResult {
   // unknown: work is still to come but its point values are not known yet (Gradescope hides them until graded)
 }
 
+/** Where the letter used for a class's QPA came from. */
+export type LetterBasis =
+  | 'you' // the final letter the student picked
+  | 'sio-final' // the final grade posted in SIO
+  | 'estimate' // computed from the scores (or Canvas's own score, or a typed-in percent)
+  | 'sio-mid' // the SIO mid-semester grade, when nothing else is known
+
 export interface QpaRow {
   courseKey: string
   label: string // "21-241"
@@ -242,6 +307,7 @@ export interface QpaRow {
   points: number | null // quality points per unit for that letter
   factorable: boolean // counts toward QPA
   reason: string | null // why not factorable ("Pass/fail", "No grade yet", ...)
+  basis?: LetterBasis | null // where `letter` came from
 }
 
 export interface QpaResult {
@@ -251,5 +317,6 @@ export interface QpaResult {
   totalUnits: number
   qualityPoints: number
   cumulativeQpa: number | null // null unless prior QPA and units are set
-  deansList: { eligible: boolean; threshold: number; minUnits: number; college: string; note: string } | null
+  // incomplete: SIO shows an Incomplete (I) this semester, which rules the Dean's List out whatever the QPA
+  deansList: { eligible: boolean; threshold: number; minUnits: number; college: string; note: string; incomplete?: boolean } | null
 }

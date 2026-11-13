@@ -19,6 +19,7 @@ import {
   messagePayload,
   realDeps,
   runSync,
+  sioFetchPage,
   syncUrl,
   type ReceiverTab,
   type RunDeps,
@@ -63,6 +64,7 @@ function fakeDeps(overrides: Partial<RunDeps> = {}): RunDeps & { navigated: stri
       return payload
     },
     syncAutolab: async () => ({ ...payload, kind: 'autolab', courses: [] }),
+    syncSio: async () => ({ ...payload, kind: 'sio', courses: [], semesters: [] }),
     openReceiver: () => null, // popup blocked unless a test says otherwise: the fragment fallback
     listen: () => () => {},
     navigate: (url) => navigated.push(url),
@@ -129,19 +131,22 @@ describe('generated bundle', () => {
     const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {})
     const result = new Function(BOOKMARKLET_CODE)()
     expect(result).toBeUndefined() // a javascript: URL that returns a value would replace the page
-    expect(alertSpy).toHaveBeenCalledWith(expect.stringContaining('open canvas.cmu.edu, gradescope.com or autolab.andrew.cmu.edu'))
+    expect(alertSpy).toHaveBeenCalledWith(expect.stringContaining('open Canvas, Gradescope, Autolab or SIO'))
     expect(overlay()).toBeNull()
   })
 })
 
 describe('detectSite / syncUrl', () => {
-  test('recognizes Canvas and Gradescope hosts only', () => {
+  test('recognizes the grade site hosts only', () => {
     expect(detectSite('canvas.cmu.edu')).toBe('canvas')
     expect(detectSite('CMU.instructure.com')).toBe('canvas')
     expect(detectSite('www.gradescope.com')).toBe('gradescope')
     expect(detectSite('gradescope.com')).toBe('gradescope')
     expect(detectSite('autolab.andrew.cmu.edu')).toBe('autolab')
+    expect(detectSite('s3.andrew.cmu.edu')).toBe('sio')
     expect(detectSite('autolab.andrew.cmu.edu.evil.example')).toBeNull()
+    expect(detectSite('s3.andrew.cmu.edu.evil.example')).toBeNull()
+    expect(detectSite('andrew.cmu.edu')).toBeNull()
     expect(detectSite('canvas.cmu.edu.evil.example')).toBeNull()
     expect(detectSite('example.com')).toBeNull()
   })
@@ -154,7 +159,7 @@ describe('runSync', () => {
   test('on an unsupported site: alerts, no overlay, no navigation', async () => {
     const deps = fakeDeps({ hostname: 'example.com' })
     await runSync(deps)
-    expect(deps.alerts).toEqual([`${APP_NAME}: open canvas.cmu.edu, gradescope.com or autolab.andrew.cmu.edu, log in, then click this bookmark again.`])
+    expect(deps.alerts).toEqual([`${APP_NAME}: open Canvas, Gradescope, Autolab or SIO, log in, then click this bookmark again.`])
     expect(deps.navigated).toEqual([])
     expect(overlay()).toBeNull()
   })
@@ -169,6 +174,18 @@ describe('runSync', () => {
     const frag = parseSyncFragment(url.hash)
     expect(frag?.version).toBe(BOOKMARKLET_VERSION)
     expect(await decodePayload(frag!.payload)).toEqual(payload)
+  })
+
+  test('on SIO: uses the SIO sync', async () => {
+    const sio = vi.fn(async () => ({ ...payload, kind: 'sio' as const, courses: [], semesters: [] }))
+    const gradescope = vi.fn(async () => payload)
+    const deps = fakeDeps({ hostname: 's3.andrew.cmu.edu', syncSio: sio, syncGradescope: gradescope })
+    await runSync(deps)
+    expect(sio).toHaveBeenCalledOnce()
+    expect(gradescope).not.toHaveBeenCalled()
+    expect(deps.navigated).toHaveLength(1)
+    const frag = parseSyncFragment(new URL(deps.navigated[0]).hash)
+    expect((await decodePayload(frag!.payload)).kind).toBe('sio')
   })
 
   test('on Canvas: uses the Canvas sync', async () => {
@@ -481,6 +498,8 @@ describe('isGradeSiteOrigin', () => {
     expect(isGradeSiteOrigin('https://cmu.instructure.com')).toBe(true)
     expect(isGradeSiteOrigin('https://www.gradescope.com')).toBe(true)
     expect(isGradeSiteOrigin('https://autolab.andrew.cmu.edu')).toBe(true)
+    expect(isGradeSiteOrigin('https://s3.andrew.cmu.edu')).toBe(true)
+    expect(isGradeSiteOrigin('http://s3.andrew.cmu.edu')).toBe(false)
     expect(isGradeSiteOrigin('http://canvas.cmu.edu')).toBe(false)
     expect(isGradeSiteOrigin('https://canvas.cmu.edu.evil.example')).toBe(false)
     expect(isGradeSiteOrigin('https://canvas.cmu.edu/path')).toBe(false)
@@ -489,6 +508,40 @@ describe('isGradeSiteOrigin', () => {
   })
 })
 
+
+describe('sioFetchPage (same-origin, on s3.andrew.cmu.edu)', () => {
+  /** A stand-in for fetch's Response with the fields sioFetchPage reads. */
+  function response(body: string, url: string, status = 200) {
+    return { ok: status >= 200 && status < 300, status, url, text: async () => body } as unknown as Response
+  }
+
+  test('fetches the relative path with the SIO cookies and returns the HTML and final URL', async () => {
+    const fetchMock = vi.fn(async () => response('<html>grades</html>', 'https://s3.andrew.cmu.edu/sio/mpa/grades/home'))
+    vi.stubGlobal('fetch', fetchMock)
+    expect(await sioFetchPage('/sio/mpa/grades/home')).toEqual({
+      html: '<html>grades</html>',
+      url: 'https://s3.andrew.cmu.edu/sio/mpa/grades/home',
+    })
+    expect(fetchMock).toHaveBeenCalledWith('/sio/mpa/grades/home', { credentials: 'same-origin' })
+    vi.unstubAllGlobals()
+  })
+
+  test('sent to the CMU login (or a failed request) means logged out', async () => {
+    vi.stubGlobal('fetch', async () => response('<html>login</html>', 'https://login.cmu.edu/idp/profile/SAML2/Redirect/SSO'))
+    await expect(sioFetchPage('/sio/mpa/grades/home')).rejects.toThrow('Log in to SIO first')
+    vi.stubGlobal('fetch', async () => {
+      throw new TypeError('Failed to fetch')
+    })
+    await expect(sioFetchPage('/sio/mpa/grades/home')).rejects.toThrow('Log in to SIO first')
+    vi.unstubAllGlobals()
+  })
+
+  test('an HTTP error keeps its status', async () => {
+    vi.stubGlobal('fetch', async () => response('', 'https://s3.andrew.cmu.edu/sio/mpa/grades/home', 500))
+    await expect(sioFetchPage('/sio/mpa/grades/home')).rejects.toThrow('SIO returned an error (500)')
+    vi.unstubAllGlobals()
+  })
+})
 
 // ---------------------------------------------------------------- syllabi (made-up data)
 

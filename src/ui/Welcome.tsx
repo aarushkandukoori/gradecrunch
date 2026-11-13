@@ -34,7 +34,7 @@ export function Welcome(p: Props) {
       {p.mode === 'welcome' ? (
         <section className="hero">
           <h1>All your CMU grades in one place.</h1>
-          <p className="lead">Your Canvas and Gradescope scores, merged per class, with your QPA.</p>
+          <p className="lead">Your Canvas, Gradescope and SIO grades, merged per class, with your QPA.</p>
         </section>
       ) : p.ext ? (
         <section className="hero">
@@ -64,7 +64,7 @@ export function Welcome(p: Props) {
       {!p.ext && <ConnectTrouble toast={p.toast} />}
 
       <p className="privacy-line muted small">
-        Your grades stay in this browser. Nothing goes to a server.{' '}
+        Your grades are saved only in this browser. Nothing goes to a server unless you use the AI advisor.{' '}
         <NavLink to="privacy" navigate={p.navigate}>
           Privacy
         </NavLink>

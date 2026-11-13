@@ -1,6 +1,6 @@
 /// <reference path="./chrome.d.ts" />
 // The offscreen document: a hidden extension page the service worker opens only while a sync runs. It exists because
-// the sync code parses Gradescope and Autolab HTML with DOMParser, which service workers do not have.
+// the sync code parses Gradescope, Autolab and SIO HTML with DOMParser, which service workers do not have.
 // Offscreen documents only get chrome.runtime, so this page just runs the sync and messages the results back;
 // the service worker does everything else (storage, talking to the website).
 //

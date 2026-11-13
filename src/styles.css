@@ -947,18 +947,6 @@ code {
   align-items: flex-start;
 }
 
-.claude-text {
-  width: 100%;
-  padding: 12px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  background: var(--surface-2);
-  font-family: var(--mono);
-  font-size: 12px;
-  line-height: 1.5;
-  resize: vertical;
-}
-
 /* ------------------------------------------------------------------ toasts */
 
 .toasts {
@@ -1357,27 +1345,101 @@ code {
   border-top: 1px solid var(--border);
 }
 
+/* One class: the row button (opens the class) and, for most classes in the main list, the P/F button after it. The
+   row button fills the whole line and P/F sits on top of its right end, so a click anywhere else opens the class.
+   Two buttons, never one inside the other. */
+.class-item {
+  position: relative;
+  display: flex;
+  transition: background var(--ease);
+}
+
+/* The whole line lights up when the pointer is on the row, but not on P/F, which is its own button. */
+.class-item:has(.class-row:hover) {
+  background: var(--surface-2);
+}
+
 .class-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   min-height: 68px;
   padding: 14px 20px;
   border: 0;
   background: transparent;
   text-align: left;
-  transition: background var(--ease);
-}
-
-.class-row:hover {
-  background: var(--surface-2);
 }
 
 .class-row:focus-visible {
   outline-offset: -2px;
   border-radius: 0;
+}
+
+/* Room for P/F at the right end (20px edge + 36px pill + 20px gap). Every row in a list that has a P/F gets it, so the
+   grades line up even on a row without one. */
+.class-list:has(.pf-toggle) .class-row {
+  padding-right: 76px;
+}
+
+/* P/F: a small pill on top of the row's right end. Off, a quiet outline; on (aria-pressed), filled with the accent
+   color. 24px tall, so it is still easy to click. */
+.pf-toggle {
+  position: absolute;
+  top: 50%;
+  right: 20px;
+  transform: translateY(-50%);
+  min-width: 36px;
+  min-height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-3);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1;
+  transition: background var(--ease), border-color var(--ease), color var(--ease);
+}
+
+.pf-toggle:hover {
+  border-color: var(--text-3);
+  color: var(--text);
+}
+
+.pf-toggle[aria-pressed='true'] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
+
+.pf-toggle[aria-pressed='true']:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+/* A finger needs more room than the pill shows: on touch screens an invisible box makes the tap target 44px tall.
+   The box is measured from inside the 1px border (22px), so it reaches 11px further up and down. */
+@media (pointer: coarse) {
+  .pf-toggle::after {
+    content: "";
+    position: absolute;
+    inset: -11px -7px;
+  }
+}
+
+/* Windows high contrast mode replaces the colors: "on" uses the system's highlight colors instead of the fill, also
+   on hover (the hover rule above would otherwise bring the green back). */
+@media (forced-colors: active) {
+  .pf-toggle[aria-pressed='true'],
+  .pf-toggle[aria-pressed='true']:hover {
+    forced-color-adjust: none;
+    background: Highlight;
+    border-color: Highlight;
+    color: HighlightText;
+  }
 }
 
 .class-id {
@@ -1486,6 +1548,52 @@ code {
   color: var(--n-fg);
 }
 
+/* ------------------------------------------------------------------ past semesters (from SIO) */
+
+.past-page {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.past-page h1 {
+  font-size: 30px;
+  letter-spacing: -0.02em;
+}
+
+.past-official {
+  font-size: 17px;
+  color: var(--text-2);
+}
+
+.past-sem {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.past-sem-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 2px 16px;
+}
+
+.past-sem-head h2 {
+  font-size: 19px;
+}
+
+/* Same layout as a class row, but plain text: past classes have nothing to open. */
+.past-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 56px;
+  padding: 10px 20px;
+}
+
 /* ------------------------------------------------------------------ class page */
 
 .class-page {
@@ -1539,6 +1647,12 @@ code {
   display: flex;
   align-items: center;
   gap: 12px;
+}
+
+/* "Ask the AI advisor about this class": only as wide as its text, with a tap-sized height */
+.class-ask {
+  align-self: flex-start;
+  min-height: 32px;
 }
 
 .big-percent {
@@ -2027,8 +2141,28 @@ code {
     padding: 0 10px;
   }
 
+  /* On a very small phone the term picker gets narrower; the buttons keep their size. */
+  .term-select {
+    min-width: 0;
+  }
+
   .term-select select {
-    max-width: 130px;
+    max-width: min(130px, 100%);
+  }
+
+  .topbar-right > :not(.term-select) {
+    flex: none;
+  }
+
+  /* With the term picker, Sync, AI advisor and the gear all in the bar, the wordmark keeps only its logo (the name
+     stays for screen readers), so nothing gets pushed off the right edge. */
+  .topbar-inner:has(.term-select) .wordmark span {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
   }
 
   .welcome {
@@ -2043,8 +2177,17 @@ code {
     font-size: 48px;
   }
 
-  .class-row {
+  .class-row,
+  .past-row {
     padding: 14px 16px;
+  }
+
+  .class-list:has(.pf-toggle) .class-row {
+    padding-right: 68px;
+  }
+
+  .pf-toggle {
+    right: 16px;
   }
 
   .big-percent {

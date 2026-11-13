@@ -29,13 +29,21 @@ export function FinishSetup({ onOpenWelcome }: { onOpenWelcome: () => void }) {
   )
 }
 
-/** One short line per site that needs a login or failed. Renders nothing when all went well. */
-export function SyncNotes({ notes }: { notes: SyncNote[] }) {
+/**
+ * One short line per site that needs a login or failed. Renders nothing when all went well. `sioSaved`: SIO was synced
+ * before, so its login line says "update" instead of listing what SIO adds.
+ */
+export function SyncNotes({ notes, sioSaved = false }: { notes: SyncNote[]; sioSaved?: boolean }) {
   if (notes.length === 0) return null
   return (
     <ul className="sync-notes" aria-live="polite">
       {notes.map((n, i) =>
-        n.kind === 'login' ? (
+        n.kind === 'login' && n.source === 'sio' ? (
+          <li key="login-sio">
+            <ExternalLink href={n.url}>Log in to SIO</ExternalLink>{' '}
+            {sioSaved ? 'to check for new grades.' : 'to add your exact units, pass/fail classes and past semesters.'}
+          </li>
+        ) : n.kind === 'login' ? (
           <li key={`login-${n.source}`}>
             Log in to {SITE_NAMES[n.source]} to include it.{' '}
             <ExternalLink href={n.url}>Open {SITE_NAMES[n.source]}</ExternalLink>

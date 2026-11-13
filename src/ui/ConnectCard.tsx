@@ -5,7 +5,7 @@
 //   3. Not installed and not published yet (CHROME_STORE_URL is empty): the Sync bookmarklet, as before.
 import { useEffect, useRef } from 'react'
 import { bookmarkletHref } from '../lib/bookmarklet'
-import { AUTOLAB_ORIGIN, CANVAS_ORIGIN, CHROME_STORE_URL, GRADESCOPE_ORIGIN } from '../lib/brand'
+import { AUTOLAB_ORIGIN, CANVAS_ORIGIN, CHROME_STORE_URL, GRADESCOPE_ORIGIN, SIO_GRADES_URL } from '../lib/brand'
 import { FinishSetup, SyncNotes, type ExtensionView } from './ExtensionBits'
 import { ExternalLink } from './Link'
 import { SyncIcon } from './icons'
@@ -58,7 +58,8 @@ export function ConnectCard({ toast, ext, storeUrl = CHROME_STORE_URL }: Props) 
         <li>Drag it to your bookmarks bar</li>
         <li>
           Click it on <ExternalLink href={`${CANVAS_ORIGIN}/`}>Canvas</ExternalLink>, then on{' '}
-          <ExternalLink href={`${GRADESCOPE_ORIGIN}/`}>Gradescope</ExternalLink>
+          <ExternalLink href={`${GRADESCOPE_ORIGIN}/`}>Gradescope</ExternalLink> and{' '}
+          <ExternalLink href={SIO_GRADES_URL}>SIO</ExternalLink>
         </li>
       </ol>
       <p className="muted small">A Chrome extension is coming soon.</p>
@@ -119,7 +120,7 @@ export function ConnectTrouble({ toast, storeUrl = CHROME_STORE_URL }: { toast: 
           // With the extension as the main way in, the bookmarklet is the fallback (Safari, Firefox, school laptops).
           <li>
             Not on Chrome, or can't add extensions? Drag <BookmarkletButton toast={toast} small /> to your bookmarks
-            bar, then click it on Canvas and on Gradescope.
+            bar, then click it on Canvas, Gradescope and SIO.
           </li>
         )}
         <li>

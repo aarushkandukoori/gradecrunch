@@ -1,0 +1,334 @@
+/* The AI advisor chat (ChatPanel.tsx) and the notes list in Settings (MemoryList.tsx). Uses the color tokens from
+   styles.css, so dark mode just works. */
+
+/* ------------------------------------------------------------------ the sheet */
+
+/* A native modal <dialog> pinned to the right edge, full height. The browser's centered dialog box is reset. */
+.chat-sheet {
+  inset: 0 0 0 auto;
+  margin: 0;
+  width: min(440px, 100vw);
+  max-width: none;
+  height: 100%;
+  max-height: none;
+  padding: 0;
+  border: 0;
+  border-left: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-pop);
+  overflow: hidden; /* only the message list scrolls */
+}
+
+/* display only while open: setting it on a closed dialog would show it */
+.chat-sheet[open] {
+  display: flex;
+  flex-direction: column;
+  animation: chat-in 180ms ease;
+}
+
+/* Scrolling inside the sheet, or over the dimmed page, must not scroll the page behind it. */
+.chat-sheet:modal {
+  overscroll-behavior: contain;
+}
+
+.chat-sheet::backdrop {
+  background: rgba(10, 10, 9, 0.45);
+  overflow: hidden;
+  overscroll-behavior: contain;
+}
+
+@keyframes chat-in {
+  from {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+}
+
+.chat-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 14px 14px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.chat-head h2 {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 17px;
+}
+
+.chat-head h2 .icon {
+  color: var(--accent);
+}
+
+/* ------------------------------------------------------------------ first-use notice */
+
+.chat-consent {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 20px;
+  font-size: 14px;
+  overflow-y: auto;
+}
+
+.chat-consent ul {
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--text-2);
+}
+
+/* ------------------------------------------------------------------ messages */
+
+.chat-log {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 20px;
+}
+
+.chat-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  font-size: 14px;
+}
+
+.chat-starters {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.chat-starters .btn {
+  white-space: normal;
+  text-align: left;
+  line-height: 1.35;
+  padding-block: 6px;
+}
+
+.chat-msg {
+  max-width: 88%;
+  font-size: 14px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.chat-user {
+  align-self: flex-end;
+  padding: 8px 12px;
+  border-radius: 14px 14px 4px 14px;
+  background: var(--accent-soft);
+}
+
+.chat-plain {
+  white-space: pre-wrap;
+}
+
+.chat-assistant {
+  align-self: flex-start;
+  padding: 10px 12px;
+  border-radius: 14px 14px 14px 4px;
+  background: var(--surface-2);
+}
+
+.chat-assistant p {
+  white-space: pre-line;
+}
+
+.chat-assistant p + p,
+.chat-assistant p + ul,
+.chat-assistant p + ol,
+.chat-assistant ul + p,
+.chat-assistant ol + p {
+  margin-top: 8px;
+}
+
+.chat-assistant ul,
+.chat-assistant ol {
+  margin: 4px 0 0;
+  padding-left: 20px;
+}
+
+.chat-error {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.chat-receipt {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  font-size: 13px;
+}
+
+.chat-receipt .icon {
+  align-self: center;
+  color: var(--accent);
+}
+
+.chat-receipt-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.chat-receipt.is-undone .chat-receipt-text {
+  color: var(--text-3);
+  text-decoration: line-through;
+}
+
+/* Three dots while the answer is on its way (role="progressbar" in the markup, so it isn't read as a message). */
+.chat-typing {
+  align-self: flex-start;
+  display: inline-flex;
+  gap: 4px;
+  margin: 0 20px 10px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: var(--surface-2);
+}
+
+.chat-typing span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-3);
+  animation: chat-dot 1s ease-in-out infinite;
+}
+
+.chat-typing span:nth-child(2) {
+  animation-delay: 150ms;
+}
+
+.chat-typing span:nth-child(3) {
+  animation-delay: 300ms;
+}
+
+@keyframes chat-dot {
+  0%,
+  80%,
+  100% {
+    opacity: 0.3;
+  }
+  40% {
+    opacity: 1;
+  }
+}
+
+/* ------------------------------------------------------------------ the question box */
+
+.chat-form {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 12px 20px 4px;
+  border-top: 1px solid var(--border);
+}
+
+.chat-input {
+  flex: 1;
+  width: 100%;
+  /* grows with the text where supported (a fixed box that scrolls elsewhere) */
+  field-sizing: content;
+  min-block-size: 38px;
+  max-block-size: 8lh;
+  padding: 8px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  line-height: 1.4;
+  resize: none;
+}
+
+.chat-input:focus-visible {
+  border-color: var(--focus);
+}
+
+.chat-form .btn {
+  min-height: 38px;
+}
+
+.chat-foot {
+  padding: 2px 20px 12px;
+}
+
+/* ------------------------------------------------------------------ phones: the sheet fills the screen */
+
+@media (max-width: 640px) {
+  .chat-sheet {
+    width: 100%;
+    border-left: 0;
+  }
+
+  .chat-msg {
+    max-width: 94%;
+  }
+}
+
+/* ------------------------------------------------------------------ notes in Settings (MemoryList) */
+
+.memory-list {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.memory-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 4px 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.memory-text {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.memory-edit {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 0;
+}
+
+.memory-edit input {
+  flex: 1 1 200px;
+  min-width: 0;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.memory-edit input:focus-visible {
+  border-color: var(--focus);
+}

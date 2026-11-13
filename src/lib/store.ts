@@ -5,9 +5,10 @@
 // It also holds small pure helpers that return an updated copy of the store or of one course's prefs, so React
 // state updates stay one-liners in the components and are easy to test.
 import { APP_SLUG } from './brand'
-import { canonicalTerm } from './courseNumber'
+import { canonicalTerm, termSortKey } from './courseNumber'
+import { cleanSioSemesters } from './payload'
 import { capSyllabusText } from './syllabus'
-import type { CoursePrefs, GradeCut, ManualCourse, ManualItem, Settings, Store, SyncedCourse, SyncPayload } from '../types'
+import type { CoursePrefs, GradeCut, ManualCourse, ManualItem, Settings, SioData, Store, SyncedCourse, SyncPayload } from '../types'
 
 export const STORE_KEY = `${APP_SLUG}:v1`
 export const THEME_KEY = `${APP_SLUG}:theme`
@@ -157,8 +158,30 @@ export function parseStore(x: unknown): Store | null {
   if (typeof ls.canvas === 'string') lastSync.canvas = ls.canvas
   if (typeof ls.gradescope === 'string') lastSync.gradescope = ls.gradescope
   if (typeof ls.autolab === 'string') lastSync.autolab = ls.autolab
+  if (typeof ls.sio === 'string') lastSync.sio = ls.sio
 
-  return { v: 1, synced, manual, prefs, settings, lastSync, ...(x.demo === true ? { demo: true } : {}) }
+  // SIO data gets the same strict check as a sync payload (stores saved before SIO support have none).
+  const sio = parseSio(x.sio)
+
+  return {
+    v: 1,
+    synced,
+    manual,
+    prefs,
+    settings,
+    lastSync,
+    ...(sio ? { sio } : {}),
+    ...(x.demo === true ? { demo: true } : {}),
+  }
+}
+
+/** Saved SIO data, cleaned, or undefined when there is none worth keeping. */
+function parseSio(x: unknown): SioData | undefined {
+  if (!isObject(x)) return undefined
+  const semesters = cleanSioSemesters(x.semesters)
+  if (semesters.length === 0) return undefined
+  const unread = (stringList(x.unread) ?? []).filter((code) => /^[A-Za-z0-9]{1,10}$/.test(code)).slice(0, 50)
+  return { semesters, syncedAt: typeof x.syncedAt === 'string' ? x.syncedAt : '', ...(unread.length > 0 ? { unread } : {}) }
 }
 
 /** The saved store, or a fresh one when nothing is saved or the saved JSON is corrupt. */
@@ -193,12 +216,14 @@ export function exportStoreJson(store: Store): string {
  *     and Gradescope stop listing once a term ends) stay with their final grades.
  * Courses from other sources are never touched. Prefs are keyed by merged course, so they survive.
  * Syllabus documents are saved as text only (at most 60 KB per course): PDFs never go into localStorage.
+ * An SIO payload carries semesters instead of courses and only changes store.sio (see applySio).
  */
 export function applyPayload(store: Store, payload: SyncPayload): Store {
   payload = capSyllabusText(payload)
   // A real sync replaces the sample data (never mix demo courses with real ones), keeping hand-added classes.
   if (store.demo) store = withoutDemo(store)
   const lastSync = { ...store.lastSync, [payload.kind]: payload.at }
+  if (payload.kind === 'sio') return { ...store, lastSync, ...applySio(store.sio, payload) }
   if (payload.courses.length === 0) return { ...store, lastSync } // rule 1
 
   const failed = new Set(payload.failedIds ?? [])
@@ -213,12 +238,29 @@ export function applyPayload(store: Store, payload: SyncPayload): Store {
       (inPayload.has(course.sourceId) || termsInPayload.has(canonicalTerm(course.term))) // rule 3
     if (!replaced) synced[key] = course
   }
+  const kind = payload.kind // never 'sio' here (handled above)
   for (const course of payload.courses) {
-    const key = `${payload.kind}:${course.sourceId}`
+    const key = `${kind}:${course.sourceId}`
     if (failed.has(course.sourceId) && synced[key]) continue // rule 2: the stored copy is better than a broken one
-    synced[key] = { ...course, source: payload.kind }
+    synced[key] = { ...course, source: kind }
   }
   return { ...store, synced, lastSync }
+}
+
+/**
+ * SIO's part of applyPayload: the new semesters replace the stored ones, with the same rules as courses. A sync that
+ * read no semesters changes nothing (SIO's page probably changed), and a semester that could not be read (its code
+ * is in failedIds) keeps its stored copy. One that failed with no stored copy (often on the first sync) is listed in
+ * `unread`, so the app knows the record has a hole. Returns the store fields to change.
+ */
+function applySio(old: SioData | undefined, payload: SyncPayload): { sio?: SioData } {
+  const fresh = payload.semesters ?? []
+  if (fresh.length === 0) return {}
+  const failed = new Set(payload.failedIds ?? [])
+  const kept = (old?.semesters ?? []).filter((s) => failed.has(s.code) && !fresh.some((f) => f.code === s.code))
+  const semesters = [...fresh, ...kept].sort((a, b) => termSortKey(b.term) - termSortKey(a.term) || b.code.localeCompare(a.code))
+  const unread = [...failed].filter((code) => !semesters.some((s) => s.code === code))
+  return { sio: { semesters, syncedAt: payload.at, ...(unread.length > 0 ? { unread } : {}) } }
 }
 
 export function updateSettings(store: Store, patch: Partial<Settings>): Store {
@@ -291,6 +333,15 @@ export function withWhatIf(p: CoursePrefs, itemKey: string, value: number | null
 /** Sets (or clears) one category weight. Typing a weight means "use weights", so weighted turns on. */
 export function withWeight(p: CoursePrefs, categoryKey: string, weight: number | null): CoursePrefs {
   return { ...p, weights: setKey(p.weights, categoryKey, weight), weighted: true }
+}
+
+/**
+ * Turns "pass/fail" or "hidden" on or off for one class. `auto` is what the class does when the student sets nothing:
+ * SIO grade option "P" means pass/fail, and a class SIO doesn't list is hidden. Picking the same as `auto` clears the
+ * setting (the class keeps following SIO); picking the opposite is saved and wins over SIO.
+ */
+export function withToggle(p: CoursePrefs, key: 'passFail' | 'hidden', on: boolean, auto = false): CoursePrefs {
+  return { ...p, [key]: on === auto ? undefined : on }
 }
 
 /** Count an item we skipped automatically (an alternate exam), or go back to skipping it. */

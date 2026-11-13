@@ -4,7 +4,7 @@
 import { useState, type FormEvent } from 'react'
 import { courseLabel, dropRuleText, formatPercent } from '../lib/format'
 import { isCountable } from '../lib/grade'
-import { randomId, withCutoff, withPlanned, withWeight } from '../lib/store'
+import { randomId, withCutoff, withPlanned, withToggle, withWeight } from '../lib/store'
 import { activeWhatIfs, whatIfApplies, withoutWhatIfs } from '../lib/whatIfs'
 import type { Category, Course, CoursePrefs, GradeCut, GradeResult, Level, NeededResult } from '../types'
 import { ItemRow } from './ItemRow'
@@ -331,6 +331,7 @@ const UNITS_HINT: Record<Course['unitsSource'], string> = {
   catalog: 'From the CMU catalog',
   custom: 'Set by you',
   default: 'A guess. Check SIO',
+  sio: 'From SIO',
 }
 
 const SCHEME_HINT: Record<Course['schemeSource'], string> = {
@@ -341,6 +342,10 @@ const SCHEME_HINT: Record<Course['schemeSource'], string> = {
 
 function CourseSettings({ course, level, onPrefs, onRemove }: Pick<Props, 'course' | 'level' | 'onPrefs' | 'onRemove'>) {
   const prefs = course.prefs
+  // What the class does when the student sets nothing (see withToggle): SIO "P" means pass/fail, and a class SIO
+  // doesn't list is hidden.
+  const sioPassFail = course.sio?.gradeOption === 'P'
+  const notRegistered = course.sio?.registered === false
   const letters = [...(level === 'grad' ? GRAD_LETTERS : UNDERGRAD_LETTERS), ...OTHER_LETTERS]
   // A letter set in grad mode (e.g. "B-") is still in effect after switching to undergrad. Keep it in the list
   // so the box shows it (instead of "Auto") and the student can see and clear it.
@@ -400,7 +405,7 @@ function CourseSettings({ course, level, onPrefs, onRemove }: Pick<Props, 'cours
           <input
             type="checkbox"
             checked={prefs.passFail ?? false}
-            onChange={(e) => onPrefs((p) => ({ ...p, passFail: e.target.checked || undefined }))}
+            onChange={(e) => onPrefs((p) => withToggle(p, 'passFail', e.target.checked, sioPassFail))}
           />
           Taken pass/fail
         </label>
@@ -408,7 +413,7 @@ function CourseSettings({ course, level, onPrefs, onRemove }: Pick<Props, 'cours
           <input
             type="checkbox"
             checked={prefs.hidden ?? false}
-            onChange={(e) => onPrefs((p) => ({ ...p, hidden: e.target.checked || undefined }))}
+            onChange={(e) => onPrefs((p) => withToggle(p, 'hidden', e.target.checked, notRegistered))}
           />
           Hide this class
         </label>

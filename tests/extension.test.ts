@@ -1,6 +1,6 @@
 // Tests for the Chrome extension (extension/src). Only made-up data: no real courses or grades.
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
-import { LOGIN_URLS } from '../extension/protocol'
+import { ALL_SOURCES, LOGIN_URLS } from '../extension/protocol'
 import manifest from '../extension/manifest.json'
 import welcomeHtml from '../extension/welcome.html?raw'
 import {
@@ -13,7 +13,7 @@ import {
   resultForStorage,
   resultFromError,
 } from '../extension/src/rules'
-import { autolabFetchPage, gradescopeFetchText, runSource, siteUrl } from '../extension/src/sync'
+import { autolabFetchPage, gradescopeFetchText, runSource, sioFetchPage, siteUrl } from '../extension/src/sync'
 import { absoluteFetcher, CanvasAuthError, CanvasHttpError } from '../src/sync/canvas'
 
 const PATTERNS = ['https://grades.aarushkandukoori.com/*', 'https://gradecrunch.pages.dev/*', 'http://localhost/*']
@@ -71,9 +71,15 @@ describe('isAllowedOrigin', () => {
 // ---------------------------------------------------------------- request validation
 
 describe('parseRequest', () => {
-  test('hello and openWelcome', () => {
+  test('hello, openWelcome and reload', () => {
     expect(parseRequest({ type: 'hello' })).toEqual({ type: 'hello' })
     expect(parseRequest({ type: 'openWelcome', extra: 1 })).toEqual({ type: 'openWelcome' })
+    expect(parseRequest({ type: 'reload' })).toEqual({ type: 'reload' }) // only the dev build acts on it
+  })
+
+  test('SIO is a site it can sync', () => {
+    expect(parseRequest({ type: 'sync', sources: ['sio', 'canvas'] })).toEqual({ type: 'sync', sources: ['canvas', 'sio'] })
+    expect(ALL_SOURCES).toEqual(['canvas', 'gradescope', 'autolab', 'sio'])
   })
 
   test('sync keeps known sites once, in a fixed order', () => {
@@ -109,6 +115,33 @@ describe('internal message checks', () => {
     expect(isSourceResultFor({ source: 'canvas', status: 'login', loginUrl: 'https://canvas.cmu.edu/' }, 'canvas')).toBe(true)
     expect(isSourceResultFor({ source: 'canvas', status: 'error' }, 'canvas')).toBe(false)
     expect(isSourceResultFor(undefined, 'canvas')).toBe(false)
+  })
+})
+
+describe('SIO permission', () => {
+  test('the manifest can reach SIO (s3.andrew.cmu.edu) and the login link is the Grades page', () => {
+    expect(manifest.host_permissions).toContain('https://s3.andrew.cmu.edu/*')
+    expect(LOGIN_URLS.sio).toBe('https://s3.andrew.cmu.edu/sio/mpa/grades/home')
+  })
+
+  test('the welcome page says what it reads on SIO', () => {
+    expect(welcomeHtml).toContain('s3.andrew.cmu.edu')
+    expect(welcomeHtml).toContain('mid-semester and final grades')
+  })
+})
+
+describe('privacy wording', () => {
+  // The site's optional AI advisor chat sends a grade summary to OpenAI, so "nothing goes to a server" would be false.
+  test('the store summary fits the 132-character limit and makes no "no server" claim', () => {
+    expect(manifest.description.length).toBeLessThanOrEqual(132)
+    expect(manifest.description).not.toMatch(/server/i)
+  })
+
+  test('the welcome page says what the site sends to OpenAI when you use the AI advisor', () => {
+    expect(welcomeHtml).toContain('OpenAI')
+    expect(welcomeHtml).toContain('optional AI advisor')
+    expect(welcomeHtml).not.toMatch(/\bAsk\b/) // the chat's old name
+    expect(welcomeHtml).not.toContain('never sent to a server')
   })
 })
 
@@ -157,6 +190,11 @@ describe('resultFromError', () => {
       loginUrl: 'https://www.gradescope.com/',
     })
     expect(resultFromError('autolab', new Error('Log in to Autolab first')).status).toBe('login')
+    expect(resultFromError('sio', new Error('Log in to SIO first'))).toEqual({
+      source: 'sio',
+      status: 'login',
+      loginUrl: 'https://s3.andrew.cmu.edu/sio/mpa/grades/home',
+    })
   })
 
   test('anything else becomes an error result with the message', () => {
@@ -217,6 +255,7 @@ describe('siteUrl (requests with cookies stay on the grade site)', () => {
     vi.stubGlobal('fetch', fetchMock)
     await expect(gradescopeFetchText('@evil.example/')).rejects.toThrow('Refused to fetch')
     await expect(autolabFetchPage('//evil.example/')).rejects.toThrow('Refused to fetch')
+    await expect(sioFetchPage('@evil.example/')).rejects.toThrow('Refused to fetch')
     expect(fetchMock).not.toHaveBeenCalled()
   })
 })
@@ -259,6 +298,36 @@ describe('autolabFetchPage', () => {
   test('a redirect off Autolab means logged out', async () => {
     vi.stubGlobal('fetch', async () => fakeResponse('', { url: 'https://login.example.edu/idp' }))
     await expect(autolabFetchPage('/courses')).rejects.toThrow('Log in to Autolab first')
+  })
+})
+
+describe('sioFetchPage', () => {
+  test('fetches the full URL with cookies and returns the HTML and the final URL', async () => {
+    const fetchMock = vi.fn(async () =>
+      fakeResponse('<html>grades</html>', { url: 'https://s3.andrew.cmu.edu/sio/mpa/grades/home?semester=F25' }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    expect(await sioFetchPage('/sio/mpa/grades/home?semester=F25')).toEqual({
+      html: '<html>grades</html>',
+      url: 'https://s3.andrew.cmu.edu/sio/mpa/grades/home?semester=F25',
+    })
+    expect(fetchMock).toHaveBeenCalledWith('https://s3.andrew.cmu.edu/sio/mpa/grades/home?semester=F25', {
+      credentials: 'include',
+    })
+  })
+
+  test('sent to the CMU login, or blocked on the way there, means logged out', async () => {
+    vi.stubGlobal('fetch', async () => fakeResponse('<html>login</html>', { url: 'https://login.cmu.edu/idp/profile/SAML2/Redirect/SSO' }))
+    await expect(sioFetchPage('/sio/mpa/grades/home')).rejects.toThrow('Log in to SIO first')
+    vi.stubGlobal('fetch', async () => {
+      throw new TypeError('Failed to fetch') // what Chrome does when the redirect leaves the extension's sites
+    })
+    await expect(sioFetchPage('/sio/mpa/grades/home')).rejects.toThrow('Log in to SIO first')
+  })
+
+  test('HTTP errors keep their status', async () => {
+    vi.stubGlobal('fetch', async () => fakeResponse('', { status: 503, url: 'https://s3.andrew.cmu.edu/sio/mpa/grades/home' }))
+    await expect(sioFetchPage('/sio/mpa/grades/home')).rejects.toThrow('SIO returned an error (503)')
   })
 })
 
@@ -323,6 +392,33 @@ describe('runSource', () => {
     expect((await runSource('autolab', () => {})).status).toBe('login')
   })
 
+  test('SIO: reads the Grades page and every other semester; logged out gives a login result', async () => {
+    const page = (code: string, label: string) =>
+      `<select id="grades-semester-code-select"><optgroup label="UNDERGRADUATE">` +
+      `<option value="F26"${code === 'F26' ? ' selected' : ''}>Fall 2026</option>` +
+      `<option value="S26"${code === 'S26' ? ' selected' : ''}>Spring 2026</option></optgroup></select>` +
+      `<h2 class="page-title">Grades for ${label}</h2>` +
+      `<table id="semester-grades-table"><tr class="header-row"><th>COURSE</th><th>NUMBER</th><th>UNITS</th><th>FINAL</th></tr>` +
+      `<tr><td>Made-up Course</td><td>99-101 A</td><td>9.0</td><td>${code === 'S26' ? 'A' : 'NA'}</td></tr></table>`
+    const urls: string[] = []
+    vi.stubGlobal('fetch', async (url: string) => {
+      urls.push(url)
+      const code = url.includes('semester=F26') ? 'F26' : 'S26' // the plain page shows the last finished semester
+      return fakeResponse(page(code, code === 'F26' ? 'Fall 2026' : 'Spring 2026'), { url })
+    })
+    const result = await runSource('sio', () => {})
+    expect(result).toMatchObject({ source: 'sio', status: 'ok', payload: { kind: 'sio', courses: [] } })
+    const semesters = (result as { payload: { semesters: { code: string }[] } }).payload.semesters
+    expect(semesters.map((s) => s.code)).toEqual(['F26', 'S26'])
+    expect(urls).toEqual([
+      'https://s3.andrew.cmu.edu/sio/mpa/grades/home',
+      'https://s3.andrew.cmu.edu/sio/mpa/grades/home?semester=F26',
+    ])
+
+    vi.stubGlobal('fetch', async () => fakeResponse('<html>Web Login</html>', { url: 'https://login.cmu.edu/idp/profile/SAML2/Redirect/SSO' }))
+    expect(await runSource('sio', () => {})).toEqual({ source: 'sio', status: 'login', loginUrl: LOGIN_URLS.sio })
+  })
+
   test('a network failure gives an error result', async () => {
     vi.stubGlobal('fetch', async () => {
       throw new TypeError('Failed to fetch')
@@ -355,6 +451,7 @@ const fakeChrome = {
     getContexts: vi.fn(async () => [] as unknown[]),
     getPlatformInfo: vi.fn(async () => ({})),
     sendMessage: vi.fn(async (_message: any): Promise<unknown> => undefined),
+    reload: vi.fn(),
   },
   storage: {
     local: {
@@ -412,11 +509,11 @@ describe('background service worker', () => {
     expect(wrongName.port.disconnect).toHaveBeenCalled()
   })
 
-  test('hello answers with the version and consent, then closes the port', async () => {
+  test('hello answers with the version, consent and the sites it can sync, then closes the port', async () => {
     const c = connect('https://gradecrunch.pages.dev')
     c.request({ type: 'hello' })
     await c.done()
-    expect(c.posted).toEqual([{ type: 'hello', version: '1.2.3', consent: false }])
+    expect(c.posted).toEqual([{ type: 'hello', version: '1.2.3', consent: false, sources: ['canvas', 'gradescope', 'autolab', 'sio'] }])
   })
 
   test('only the first request on a port is answered', async () => {
@@ -425,8 +522,32 @@ describe('background service worker', () => {
     c.request({ type: 'hello' })
     c.request({ type: 'openWelcome' })
     await c.done()
-    expect(c.posted).toEqual([{ type: 'hello', version: '1.2.3', consent: true }])
+    expect(c.posted).toEqual([{ type: 'hello', version: '1.2.3', consent: true, sources: ALL_SOURCES }])
     expect(fakeChrome.tabs.create).not.toHaveBeenCalled()
+  })
+
+  test('reload is refused unless the build switched it on (the store build)', async () => {
+    const c = connect('https://gradecrunch.pages.dev')
+    c.request({ type: 'reload' })
+    await c.done()
+    expect(c.posted).toEqual([{ type: 'error', message: 'Unknown request' }])
+    await new Promise((r) => setTimeout(r, 150))
+    expect(fakeChrome.runtime.reload).not.toHaveBeenCalled()
+  })
+
+  test('the dev build answers reload with hello, then reloads itself', async () => {
+    // scripts/build-extension.mjs replaces __DEV_BUILD__ with true in dist-extension/ and false in the store build.
+    const g = globalThis as { __DEV_BUILD__?: boolean }
+    g.__DEV_BUILD__ = true
+    try {
+      const c = connect('https://gradecrunch.pages.dev')
+      c.request({ type: 'reload' })
+      await c.done()
+      expect(c.posted).toEqual([{ type: 'hello', version: '1.2.3', consent: false, sources: ALL_SOURCES }])
+      await vi.waitFor(() => expect(fakeChrome.runtime.reload).toHaveBeenCalledOnce())
+    } finally {
+      delete g.__DEV_BUILD__
+    }
   })
 
   test('unknown requests get an error', async () => {

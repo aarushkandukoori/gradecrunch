@@ -1,5 +1,5 @@
-// Which what-if scores are actually changing a course's grade right now. The dashboard, the QPA card and the
-// Ask Claude summary use this to label numbers that include made-up scores, so a what-if typed days ago is
+// Which what-if scores are actually changing a course's grade right now. The dashboard, the class page and the
+// AI advisor's grade summary use this to label numbers that include made-up scores, so a what-if typed days ago is
 // never mistaken for a real grade.
 import { isCountable } from './grade'
 import type { Course, CoursePrefs, Item } from '../types'

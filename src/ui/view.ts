@@ -1,7 +1,7 @@
 // View logic for the dashboard, kept out of the components so it can be unit tested: which courses show for a
 // term, what one-line insight a card shows, which warnings it shows, how assignments are grouped.
-import type { Course, GradeCut, GradeResult, Item, Level, NeededResult } from '../types'
-import { stripPlusMinus } from '../lib/cmu'
+import type { Course, GradeCut, GradeResult, Item, LetterBasis, Level, NeededResult } from '../types'
+import { NON_FACTORABLE, stripPlusMinus } from '../lib/cmu'
 import { article, formatPercent } from '../lib/format'
 import { isCountable, plannedCategories } from '../lib/grade'
 import { termsOf } from '../lib/merge'
@@ -88,7 +88,8 @@ export function isManualOnly(c: Course): boolean {
  *         synced courses with no term (Canvas "Default Term").
  * Courses from other terms are in neither list; switch the term to see them.
  * Hand-added courses with no term (added on the welcome page, before any sync) belong to the newest term only,
- * since that is the semester the student is in. Counting them in every term would add them to past QPAs.
+ * since that is the semester the student is in. Counting them in every term would add them to past QPAs. (With SIO
+ * synced they have a term already: buildCourses gives them SIO's semester in progress.)
  */
 export function splitCourses(courses: Course[], term: string | null): { main: Course[]; other: Course[] } {
   const newest = termsOf(courses)[0] ?? null
@@ -268,7 +269,8 @@ export function rowHint(
   whatIf = false,
 ): string | null {
   if (course.prefs.passFail) return 'Pass/fail'
-  if (course.prefs.hidden) return 'Hidden'
+  if (course.sio?.gradeOption === 'A') return 'Audit, not in your QPA'
+  if (course.prefs.hidden) return notInSio(course) ? 'Not in your SIO classes' : 'Hidden'
   if (whatIf) return 'Includes what-if scores'
   // "Point values aren't posted yet" is true for most Gradescope classes mid-semester: not worth a line.
   if (needed.length > 0 && needed.every((n) => n.status === 'unknown')) return null
@@ -279,6 +281,29 @@ export function rowHint(
   return courseInsight(needed, grade)
 }
 
+/**
+ * The letter a class shows, on its row and on its page. A pass/fail class shows P, since its letter doesn't count
+ * toward the QPA, or N (CMU's "no pass") when the grade so far is failing. With no grade yet it shows none (the row
+ * shows "?"). A final grade posted in SIO, or a letter that never counts (like W), shows as it is.
+ */
+export function shownLetter(course: Course, letter: string | null, basis: LetterBasis | null): string | null {
+  if (!course.prefs.passFail || basis === 'sio-final' || letter === null) return letter
+  if (letter === 'R' || letter === 'X') return 'N'
+  if (NON_FACTORABLE.includes(letter)) return letter
+  return 'P'
+}
+
+/**
+ * Whether a class in the main list gets the one-tap P/F button. Not once SIO has settled it: the final grade is
+ * posted (the class is over) or the class is audited (it never counts). If the student turned P/F on anyway, the
+ * button stays so they can turn it off again.
+ */
+export function offersPassFail(course: Course): boolean {
+  const settled = Boolean(course.sio?.finalGrade) || course.sio?.gradeOption === 'A'
+  const setByStudent = course.prefs.passFail === true && course.sio?.gradeOption !== 'P'
+  return !settled || setByStudent
+}
+
 const SOURCE_LABELS: Record<Course['sources'][number]['source'], string> = {
   canvas: 'Canvas',
   gradescope: 'Gradescope',
@@ -286,9 +311,37 @@ const SOURCE_LABELS: Record<Course['sources'][number]['source'], string> = {
   manual: 'you',
 }
 
-/** "From Canvas + Gradescope", or "Added by hand" for a class typed in by hand. */
+/** "From Canvas + Gradescope + SIO", "From SIO", or "Added by hand" for a class typed in by hand. */
 export function sourceText(course: Course): string {
-  if (course.sources.length === 0 || isManualOnly(course)) return 'Added by hand'
+  if (isManualOnly(course)) return 'Added by hand'
   const names = [...new Set(course.sources.filter((s) => s.source !== 'manual').map((s) => SOURCE_LABELS[s.source]))]
-  return `From ${names.join(' + ')}`
+  if (course.sio?.registered) names.push('SIO')
+  return names.length > 0 ? `From ${names.join(' + ')}` : 'Added by hand'
+}
+
+// ---------------------------------------------------------------- SIO bits on the class list and class page
+
+/** SIO has this class's term but doesn't list the class: the student isn't registered for it. */
+export function notInSio(course: Course): boolean {
+  return course.sio?.registered === false
+}
+
+/**
+ * The mid-semester grade from SIO, or null. It says "used for your QPA" only when the QPA really uses it: the letter
+ * comes from it (`basis` is 'sio-mid' because nothing else is known) and the class counts (`counts`: it is in the
+ * QPA, so not pass/fail, audited or hidden).
+ */
+export function midGradeNote(course: Course, basis: LetterBasis | null, counts: boolean): string | null {
+  const mid = course.sio?.midGrade
+  if (!mid) return null
+  return basis === 'sio-mid' && counts ? `Mid-semester ${mid}, used for your QPA` : `Mid-semester ${mid}`
+}
+
+/**
+ * The SIO line on a class row, or null: the posted final grade, else the mid-semester grade (midGradeNote).
+ * `basis` is where the row's letter came from (letterWithBasis).
+ */
+export function sioRowNote(course: Course, basis: LetterBasis | null, counts: boolean): string | null {
+  if (basis === 'sio-final') return 'Final grade from SIO'
+  return midGradeNote(course, basis, counts)
 }

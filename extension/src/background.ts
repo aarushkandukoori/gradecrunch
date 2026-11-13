@@ -1,12 +1,14 @@
 /// <reference path="./chrome.d.ts" />
 // The extension's service worker: the part that is always installed and wakes up on events.
-//   - The GradeCrunch website connects to it (externally_connectable) and asks for 'hello', 'sync' or 'openWelcome'.
+//   - The GradeCrunch website connects to it (externally_connectable) and asks for 'hello', 'sync' or 'openWelcome'
+//     (and, in the unpacked dev build only, 'reload').
 //   - For a sync it opens the hidden offscreen page, which runs the real sync code (it needs DOMParser), relays the
 //     progress lines to the website, then sends one 'result' with an answer per site.
 //   - It also opens the welcome page on install and the website when the toolbar button is clicked.
 // Chrome requires every listener to be registered at the top level of this file, which is why they are all down here.
 import { EXT_PORT_NAME, type ExtProgress, type ExtRequest, type ExtResponse, type ExtSource, type ExtSourceResult } from '../protocol'
 import {
+  ALL_SOURCES,
   CONSENT_KEY,
   OFFSCREEN_PATH,
   PDF_ORIGINS,
@@ -22,6 +24,14 @@ import {
 } from './rules'
 
 type Send = (message: ExtResponse) => void
+
+// Set by scripts/build-extension.mjs: true in the unpacked dev build (dist-extension/), false in the store build.
+declare const __DEV_BUILD__: boolean | undefined
+
+/** True only in the dev build. Anywhere the build did not set the flag (tests, a hand-made build) it is off. */
+function isDevBuild(): boolean {
+  return typeof __DEV_BUILD__ !== 'undefined' && __DEV_BUILD__ === true
+}
 
 // ---------------------------------------------------------------- the website's port
 
@@ -67,6 +77,13 @@ async function handleRequest(request: ExtRequest | null, tabId: number | undefin
     await openWelcome(tabId)
     return send(await hello())
   }
+  if (request.type === 'reload') {
+    // Dev build only: lets a rebuilt dist-extension/ take effect without clicking Reload at chrome://extensions.
+    if (!isDevBuild()) return send({ type: 'error', message: 'Unknown request' })
+    send(await hello())
+    setTimeout(() => chrome.runtime.reload(), 100) // after the answer and the port closing have gone out
+    return
+  }
   // request.type === 'sync'
   if (!(await hasConsent())) return send({ type: 'error', message: 'consent' })
   // Each site runs on its own, so Canvas and Gradescope sync at the same time.
@@ -75,7 +92,7 @@ async function handleRequest(request: ExtRequest | null, tabId: number | undefin
 }
 
 async function hello(): Promise<ExtResponse> {
-  return { type: 'hello', version: chrome.runtime.getManifest().version, consent: await hasConsent() }
+  return { type: 'hello', version: chrome.runtime.getManifest().version, consent: await hasConsent(), sources: ALL_SOURCES }
 }
 
 async function hasConsent(): Promise<boolean> {
@@ -207,7 +224,7 @@ async function openOffscreen(): Promise<void> {
   await chrome.offscreen.createDocument({
     url: OFFSCREEN_PATH,
     reasons: ['DOM_PARSER'],
-    justification: 'Reads your Gradescope and Autolab grade pages (HTML) so GradeCrunch can show your grades.',
+    justification: 'Reads your Gradescope, Autolab and SIO grade pages (HTML) so GradeCrunch can show your grades.',
   })
 }
 

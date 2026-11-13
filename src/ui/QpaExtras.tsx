@@ -1,6 +1,7 @@
-// "QPA extras" in Settings: college, cumulative QPA (current QPA + units so far from SIO) and the Dean's List check.
+// "QPA extras" in Settings: college, cumulative QPA (current QPA + units so far, filled in from SIO when it has them)
+// and the Dean's List check.
 import { COLLEGES } from '../lib/cmu'
-import { formatQpa } from '../lib/format'
+import { formatQpa, plural } from '../lib/format'
 import type { QpaResult, Settings } from '../types'
 import { NumberField } from './NumberField'
 import { CheckIcon } from './icons'
@@ -9,11 +10,14 @@ interface Props {
   qpa: QpaResult
   settings: Settings
   onSettings: (patch: Partial<Settings>) => void
-  newestTerm: boolean // cumulative QPA only makes sense for the newest term (the SIO QPA already has older ones)
+  newestTerm: boolean // a typed cumulative QPA only makes sense for the newest term (it already has older ones)
+  sioPrior?: { qpa: number; units: number } | null // QPA and factorable units before this semester, from SIO
 }
 
-export function QpaExtras({ qpa, settings, onSettings, newestTerm }: Props) {
+export function QpaExtras({ qpa, settings, onSettings, newestTerm, sioPrior }: Props) {
   const college = COLLEGES.find((c) => c.key === settings.college)
+  // Both boxes typed: the student's numbers win over SIO's (see withSioPrior).
+  const typed = settings.priorQpa !== null && settings.priorUnits !== null
 
   return (
     <div className="settings-block qpa-extras">
@@ -31,7 +35,7 @@ export function QpaExtras({ qpa, settings, onSettings, newestTerm }: Props) {
         </select>
       </label>
 
-      {newestTerm ? (
+      {newestTerm || sioPrior ? (
         <>
           <div className="qpa-inputs">
             <NumberField
@@ -39,7 +43,7 @@ export function QpaExtras({ qpa, settings, onSettings, newestTerm }: Props) {
               value={settings.priorQpa}
               min={0}
               max={4.33}
-              placeholder="3.50"
+              placeholder={sioPrior ? formatQpa(sioPrior.qpa) : '3.50'}
               onCommit={(v) => onSettings({ priorQpa: v })}
             />
             <NumberField
@@ -47,7 +51,7 @@ export function QpaExtras({ qpa, settings, onSettings, newestTerm }: Props) {
               value={settings.priorUnits}
               min={0}
               max={1000}
-              placeholder="96"
+              placeholder={sioPrior ? String(sioPrior.units) : '96'}
               onCommit={(v) => onSettings({ priorUnits: v })}
             />
           </div>
@@ -57,7 +61,16 @@ export function QpaExtras({ qpa, settings, onSettings, newestTerm }: Props) {
                 Cumulative after this semester: <strong className="num">{formatQpa(qpa.cumulativeQpa)}</strong>.{' '}
               </>
             ) : null}
-            Find both in SIO under Academics, then Grades (factorable units).
+            {!sioPrior && 'Find both in SIO under Academics, then Grades (factorable units).'}
+            {sioPrior && !typed && 'Filled in from SIO. Type both to use your own.'}
+            {sioPrior && typed && (
+              <>
+                SIO says {formatQpa(sioPrior.qpa)} over {plural(sioPrior.units, 'unit')}.{' '}
+                <button type="button" className="link-btn" onClick={() => onSettings({ priorQpa: null, priorUnits: null })}>
+                  Use SIO's
+                </button>
+              </>
+            )}
           </p>
         </>
       ) : (
@@ -75,7 +88,7 @@ export function QpaExtras({ qpa, settings, onSettings, newestTerm }: Props) {
               <CheckIcon /> On track
             </span>
           ) : (
-            <span className="deans-no">Not yet</span>
+            <span className="deans-no">{qpa.deansList.incomplete ? 'Not with an incomplete (I) in SIO' : 'Not yet'}</span>
           )}
         </p>
       ) : college ? (

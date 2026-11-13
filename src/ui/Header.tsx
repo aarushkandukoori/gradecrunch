@@ -1,13 +1,14 @@
-// Top bar: wordmark, term picker (only with more than one term), Sync button and the settings gear.
+// Top bar: wordmark, term picker (only with more than one term), Sync button, the AI advisor (the AI chat) and the
+// settings gear.
 // With the GradeCrunch Chrome extension installed, Sync runs the extension's sync right here (spinner + progress).
 // Without it, the site cannot reach Canvas or Gradescope by itself (that is the privacy promise: only the Sync
 // bookmarklet, running in your own logged-in tab, can), so the Sync button opens a small popover saying how.
 import { useEffect, useRef, useState } from 'react'
-import { APP_NAME, AUTOLAB_ORIGIN, CANVAS_ORIGIN, GRADESCOPE_ORIGIN } from '../lib/brand'
+import { APP_NAME, AUTOLAB_ORIGIN, CANVAS_ORIGIN, GRADESCOPE_ORIGIN, SIO_GRADES_URL } from '../lib/brand'
 import { timeAgo } from '../lib/format'
 import type { Store } from '../types'
 import { ExternalLink, NavLink, type Navigate } from './Link'
-import { GearIcon, LogoMark, SyncIcon } from './icons'
+import { GearIcon, LogoMark, SparkleIcon, SyncIcon } from './icons'
 
 interface Props {
   navigate: Navigate
@@ -18,15 +19,17 @@ interface Props {
   lastSync: Store['lastSync']
   now: number
   onOpenSettings: () => void
+  onAsk?: () => void // opens the AI advisor chat (set once there are grades to ask about)
   // Set when the Chrome extension is installed: Sync calls onSync instead of opening the bookmarklet popover.
   extSync?: { onSync: () => void; syncing: boolean; progress: string | null }
 }
 
-/** "Canvas 5 min ago · Gradescope not synced" (Autolab only once it has been used). */
+/** "Canvas 5 min ago · Gradescope not synced" (Autolab and SIO only once they have been used). */
 export function syncLine(lastSync: Store['lastSync'], now: number): string {
   return (
     `Canvas ${timeAgo(lastSync.canvas, now)} · Gradescope ${timeAgo(lastSync.gradescope, now)}` +
-    (lastSync.autolab ? ` · Autolab ${timeAgo(lastSync.autolab, now)}` : '')
+    (lastSync.autolab ? ` · Autolab ${timeAgo(lastSync.autolab, now)}` : '') +
+    (lastSync.sio ? ` · SIO ${timeAgo(lastSync.sio, now)}` : '')
   )
 }
 
@@ -111,7 +114,8 @@ export function Header(p: Props) {
                   </div>
                   <p className="muted small sync-when">Last sync: {syncLine(p.lastSync, p.now)}</p>
                   <p className="muted small">
-                    Also works on <ExternalLink href={`${AUTOLAB_ORIGIN}/`}>Autolab</ExternalLink>. No Sync button?{' '}
+                    Also works on <ExternalLink href={SIO_GRADES_URL}>SIO</ExternalLink> (exact units, pass/fail and past
+                    semesters) and <ExternalLink href={`${AUTOLAB_ORIGIN}/`}>Autolab</ExternalLink>. No Sync button?{' '}
                     <NavLink
                       to="setup"
                       navigate={(v) => {
@@ -125,6 +129,13 @@ export function Header(p: Props) {
                 </div>
               )}
             </div>
+          )}
+          {p.showDashboard && p.onAsk && (
+            // On phones only the icon shows (like Sync); "AI advisor" stays as the name screen readers read.
+            <button type="button" className="btn btn-secondary btn-sm" onClick={p.onAsk}>
+              <SparkleIcon />
+              <span className="sync-label">AI advisor</span>
+            </button>
           )}
           {!p.showDashboard && (
             <nav className="topnav" aria-label="Main">

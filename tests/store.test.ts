@@ -1,5 +1,5 @@
 // Tests for the ui module: the store (localStorage, payloads, prefs helpers, theme),
-// display formatting, dashboard view logic, the Ask Claude summary, and a few full renders of <App />.
+// display formatting, dashboard view logic, and a few full renders of <App />.
 // All data is synthetic.
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { createElement } from 'react'
@@ -61,7 +61,6 @@ import {
   sortNewestFirst,
   splitCourses,
 } from '../src/ui/view'
-import { buildClaudePrompt } from '../src/lib/askClaude'
 import { encodePayload } from '../src/lib/payload'
 import { BOOKMARKLET_VERSION } from '../src/lib/bookmarklet'
 import type {
@@ -69,8 +68,6 @@ import type {
   GradeResult,
   Item,
   NeededResult,
-  QpaResult,
-  Settings,
   Store,
   SyncedCourse,
   SyncPayload,
@@ -580,6 +577,7 @@ describe('format', () => {
 
   test('letters, statuses, drop rules, labels', () => {
     expect(['A-', 'B+', 'C', 'D', 'R', 'F', 'P', 'W', null].map(letterTone)).toEqual(['a', 'b', 'c', 'd', 'r', 'r', 'n', 'n', 'n'])
+    expect(letterTone('N')).toBe('r') // "no pass": a pass/fail class that wasn't passed is a warning, like R
     expect(article('A')).toBe('an')
     expect(article('B')).toBe('a')
     expect(article('R')).toBe('an')
@@ -718,72 +716,6 @@ describe('view logic', () => {
       ['Exams', ['x']],
       ['Other', ['z']],
     ])
-  })
-})
-
-// ---------------------------------------------------------------- Ask Claude summary
-
-describe('buildClaudePrompt', () => {
-  const settings: Settings = { level: 'undergrad', college: null, priorQpa: 3.4, priorUnits: 90, term: null, showAll: false }
-
-  test('includes numbers, units, percents, categories, needs and QPA but no ids or URLs', () => {
-    const c = course({ items: [item('c:12345', { url: 'https://canvas.cmu.edu/courses/1/assignments/12345' })] })
-    const g = grade({
-      categories: [
-        { key: 'hw', name: 'Homework', weight: 40, earned: 18, possible: 20, percent: 90, dropped: [], counted: true },
-        { key: 'ex', name: 'Exams', weight: 60, earned: 80, possible: 100, percent: 80, dropped: [], counted: true },
-      ],
-    })
-    const qpa: QpaResult = {
-      rows: [],
-      semesterQpa: 3.25,
-      factorableUnits: 44,
-      totalUnits: 44,
-      qualityPoints: 143,
-      cumulativeQpa: 3.35,
-      deansList: null,
-    }
-    const text = buildClaudePrompt(
-      [c],
-      new Map([[c.key, g]]),
-      new Map([[c.key, [need('A', 90, 'possible', 95.2), need('B', 80, 'guaranteed', 0)]]]),
-      qpa,
-      settings,
-    )
-    expect(text).toContain('21-241 Matrices and Linear Transformations (11 units)')
-    expect(text).toContain('Current: 84% (B)') // 2 decimals like Canvas, no trailing zeros
-    expect(text).toContain('Homework: weight 40%, 90.0% (18 / 20 pts), drops lowest 1')
-    expect(text).toContain('A: need 95.2% average; B: guaranteed')
-    expect(text).toContain('Estimated semester QPA: 3.25 from 44 factorable units')
-    expect(text).toContain('Estimated cumulative QPA after this semester: 3.35')
-    expect(text).toContain('Semester: Fall 2026')
-    expect(text).not.toMatch(/https?:/)
-    expect(text).not.toContain('12345')
-    expect(text).not.toContain('Fall 2026|21241')
-  })
-
-  test('gives Claude what it needs to recalculate the QPA when I say a class is pass/fail', () => {
-    const a = course({ key: 'Fall 2026|21241' })
-    const b = course({ key: 'Fall 2026|85150', number: '85150', title: 'Made-up Psych', units: 9, prefs: { passFail: true } })
-    const qpa: QpaResult = {
-      rows: [
-        { courseKey: a.key, label: '21-241', units: 11, letter: 'B', points: 3, factorable: true, reason: null },
-        { courseKey: b.key, label: '85-150', units: 9, letter: 'A', points: 4, factorable: false, reason: 'Pass/fail' },
-      ],
-      semesterQpa: 3,
-      factorableUnits: 11,
-      totalUnits: 20,
-      qualityPoints: 33,
-      cumulativeQpa: 3.38,
-      deansList: null,
-    }
-    const text = buildClaudePrompt([a, b], new Map(), new Map(), qpa, settings)
-    expect(text).toContain("If I tell you I'm taking a class pass/fail, leave it out of the QPA")
-    expect(text).toContain('recalculate my semester QPA (and cumulative QPA, if given)')
-    expect(text).toContain('My cumulative QPA before this semester: 3.40 from 90 factorable units')
-    expect(text).toContain('Counts toward QPA: yes (B = 3 grade points x 11 units)')
-    expect(text).toContain('Taken pass/fail')
-    expect(text).toContain('Counts toward QPA: no (Pass/fail)')
   })
 })
 

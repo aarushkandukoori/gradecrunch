@@ -45,6 +45,7 @@ declare namespace chrome {
     function getManifest(): Manifest
     function getContexts(filter: { contextTypes?: string[]; documentUrls?: string[] }): Promise<unknown[]>
     function getPlatformInfo(): Promise<unknown>
+    function reload(): void
   }
 
   namespace storage {

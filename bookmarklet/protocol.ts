@@ -1,4 +1,4 @@
-// The message protocol between the Sync bookmarklet (running on Canvas / Gradescope / Autolab) and the
+// The message protocol between the Sync bookmarklet (running on Canvas / Gradescope / Autolab / SIO) and the
 // GradeCrunch tab it opens. Shared by both sides (the app imports it through src/lib/bookmarklet.ts), so the
 // message names are defined in exactly one place.
 //
@@ -45,7 +45,7 @@ export interface IncomingMessage {
   data: unknown
 }
 
-export type Site = 'canvas' | 'gradescope' | 'autolab'
+export type Site = 'canvas' | 'gradescope' | 'autolab' | 'sio'
 
 /** Which grade site a hostname belongs to, or null for anything else (exact matches only). */
 export function detectSite(hostname: string): Site | null {
@@ -53,6 +53,7 @@ export function detectSite(hostname: string): Site | null {
   if (host === 'canvas.cmu.edu' || host === 'cmu.instructure.com') return 'canvas'
   if (host === 'www.gradescope.com' || host === 'gradescope.com') return 'gradescope'
   if (host === 'autolab.andrew.cmu.edu') return 'autolab'
+  if (host === 's3.andrew.cmu.edu') return 'sio'
   return null
 }
 

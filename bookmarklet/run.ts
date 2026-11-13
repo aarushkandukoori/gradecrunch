@@ -7,11 +7,12 @@
 //   4. fallback when the tab was blocked or never answered: navigate this tab to <site>/#sync=<data>.
 // Nothing is sent to any server: postMessage goes tab to tab, and a URL fragment never leaves the browser.
 import type { SyncPayload } from '../src/types'
-import { APP_NAME } from '../src/lib/brand'
+import { APP_NAME, SIO_ORIGIN } from '../src/lib/brand'
 import { encodePayload } from '../src/lib/payload'
 import { sameOriginBinaryFetcher, sameOriginFetcher, syncCanvas, withoutSyllabusPdfs } from '../src/sync/canvas'
 import { syncGradescope } from '../src/sync/gradescope'
 import { syncAutolab } from '../src/sync/autolab'
+import { syncSio } from '../src/sync/sio'
 import { BOOKMARKLET_VERSION } from './version'
 import {
   detectSite,
@@ -75,6 +76,22 @@ export function autolabFetchPage(path: string): Promise<{ html: string; url: str
   })
 }
 
+/**
+ * SIO pages are HTML too. A logged-out request is sent on to CMU's login site, which a same-origin fetch can't
+ * follow (it fails), or which leaves s3.andrew.cmu.edu: either way the student has to log in first.
+ */
+export async function sioFetchPage(path: string): Promise<{ html: string; url: string }> {
+  let r: Response
+  try {
+    r = await fetch(path, { credentials: 'same-origin' })
+  } catch {
+    throw new Error('Log in to SIO first')
+  }
+  if (r.url && new URL(r.url).origin !== SIO_ORIGIN) throw new Error('Log in to SIO first')
+  if (!r.ok) throw new Error('SIO returned an error (' + r.status + ') for ' + path)
+  return { html: await r.text(), url: r.url }
+}
+
 /** The parts of the opened GradeCrunch tab we use. A real Window has all of these. */
 export interface ReceiverTab {
   readonly closed: boolean
@@ -90,6 +107,7 @@ export interface RunDeps {
   syncCanvas: (onProgress: (msg: string) => void) => Promise<SyncPayload>
   syncGradescope: (onProgress: (msg: string) => void) => Promise<SyncPayload>
   syncAutolab: (onProgress: (msg: string) => void) => Promise<SyncPayload>
+  syncSio: (onProgress: (msg: string) => void) => Promise<SyncPayload>
   openReceiver: (url: string) => ReceiverTab | null // null when the popup blocker said no
   listen: (handler: (event: IncomingMessage) => void) => () => void // returns a function that stops listening
   navigate: (url: string) => void
@@ -106,6 +124,7 @@ export function realDeps(siteOrigin: string): RunDeps {
     syncCanvas: (p) => syncCanvas(sameOriginFetcher(), p, { syllabus: { fetchBinary: sameOriginBinaryFetcher() } }),
     syncGradescope: (p) => syncGradescope(gradescopeFetchText, p),
     syncAutolab: (p) => syncAutolab(autolabFetchPage, p),
+    syncSio: (p) => syncSio(sioFetchPage, p),
     // No "noopener": the new tab needs window.opener to send us its "ready" message.
     openReceiver: (url) => window.open(url, '_blank'),
     listen: (handler) => {
@@ -177,7 +196,7 @@ export async function runSync(deps: RunDeps): Promise<void> {
   if (w.__gradeSyncRunning) return // clicking the bookmark twice should not start two syncs
   const site = detectSite(deps.hostname)
   if (!site) {
-    deps.alert(APP_NAME + ': open canvas.cmu.edu, gradescope.com or autolab.andrew.cmu.edu, log in, then click this bookmark again.')
+    deps.alert(APP_NAME + ': open Canvas, Gradescope, Autolab or SIO, log in, then click this bookmark again.')
     return
   }
 
@@ -201,7 +220,7 @@ export async function runSync(deps: RunDeps): Promise<void> {
   })
 
   try {
-    const sync = { canvas: deps.syncCanvas, gradescope: deps.syncGradescope, autolab: deps.syncAutolab }[site]
+    const sync = { canvas: deps.syncCanvas, gradescope: deps.syncGradescope, autolab: deps.syncAutolab, sio: deps.syncSio }[site]
     const payload = await sync((msg) => overlay.setStatus(msg))
     if (cancelled) return
     const encoded = await messagePayload(payload)

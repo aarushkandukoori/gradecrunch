@@ -1,12 +1,13 @@
 // Runs the website's existing sync code (src/sync/*) from inside the extension. The only difference from the
 // bookmarklet is how pages are fetched: the bookmarklet runs ON the grade site and uses relative URLs, while the
 // extension's offscreen page lives at chrome-extension://... and must use full URLs. Because the extension has host
-// permissions for the three grade sites, Chrome sends the student's own cookies with these requests.
+// permissions for the grade sites, Chrome sends the student's own cookies with these requests.
 import type { ExtSource, ExtSourceResult } from '../protocol'
-import { AUTOLAB_ORIGIN, CANVAS_ORIGIN, GRADESCOPE_ORIGIN } from '../../src/lib/brand'
+import { AUTOLAB_ORIGIN, CANVAS_ORIGIN, GRADESCOPE_ORIGIN, SIO_ORIGIN } from '../../src/lib/brand'
 import { absoluteBinaryFetcher, absoluteFetcher, syncCanvas } from '../../src/sync/canvas'
 import { syncGradescope } from '../../src/sync/gradescope'
 import { syncAutolab } from '../../src/sync/autolab'
+import { syncSio } from '../../src/sync/sio'
 import { resultFromError } from './rules'
 
 /**
@@ -43,9 +44,28 @@ export async function autolabFetchPage(path: string): Promise<{ html: string; ur
 }
 
 /**
+ * SIO pages are HTML. A logged-out request is sent on to CMU's login site (login.cmu.edu), which this extension has
+ * no access to, so the fetch fails outright or ends up off SIO: both mean "log in first". Same error text as the
+ * sync code, so resultFromError turns it into a 'login' result.
+ */
+export async function sioFetchPage(path: string): Promise<{ html: string; url: string }> {
+  const url = siteUrl(SIO_ORIGIN, path)
+  let res: Response
+  try {
+    res = await fetch(url, { credentials: 'include' })
+  } catch {
+    throw new Error('Log in to SIO first')
+  }
+  if (res.url && new URL(res.url).origin !== SIO_ORIGIN) throw new Error('Log in to SIO first')
+  if (!res.ok) throw new Error('SIO returned an error (' + res.status + ') for ' + path)
+  return { html: await res.text(), url: res.url || url }
+}
+
+/**
  * Sync one site and describe the outcome as an ExtSourceResult. Never throws: every failure becomes a 'login' or
  * 'error' result so the website always gets one answer per site.
- * Gradescope keeps its built-in one-page-a-second pace (GRADESCOPE_PAUSE_MS inside syncGradescope).
+ * Gradescope keeps its built-in one-page-a-second pace (GRADESCOPE_PAUSE_MS inside syncGradescope), SIO its short
+ * pause between semester pages (SIO_PAUSE_MS inside syncSio).
  * `pdfs`: the student granted the PDF permission, so Canvas syllabus PDFs can be downloaded too. Without it the Canvas
  * sync still reads the Syllabus page and home page text.
  */
@@ -60,6 +80,7 @@ export async function runSource(
       const fetchBinary = options.pdfs ? absoluteBinaryFetcher(CANVAS_ORIGIN) : null
       payload = await syncCanvas(absoluteFetcher(CANVAS_ORIGIN), onProgress, { syllabus: { fetchBinary } })
     } else if (source === 'gradescope') payload = await syncGradescope(gradescopeFetchText, onProgress)
+    else if (source === 'sio') payload = await syncSio(sioFetchPage, onProgress)
     else payload = await syncAutolab(autolabFetchPage, onProgress)
     return { source, status: 'ok', payload }
   } catch (err) {

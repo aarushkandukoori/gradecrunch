@@ -73,8 +73,8 @@ export function letterTone(letter: string | null | undefined): LetterTone {
   if (first === 'B') return 'b'
   if (first === 'C') return 'c'
   if (first === 'D') return 'd'
-  if (first === 'R' || first === 'F' || first === 'X') return 'r'
-  return 'n' // P, N, W, I and anything unknown
+  if (first === 'R' || first === 'F' || first === 'X' || first === 'N') return 'r' // N: a pass/fail class not passed
+  return 'n' // P, W, I and anything unknown
 }
 
 /** "a B" but "an A" / "an F" / "an R" (said "ar"). */

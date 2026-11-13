@@ -4,7 +4,18 @@
 //         "j" + base64url(UTF-8 JSON)  as a fallback
 // The decoder never trusts its input: anyone can craft a #sync= link, so validatePayload rebuilds
 // a clean SyncPayload field by field and throws away anything unexpected.
-import type { GradeCut, ItemStatus, SyllabusDoc, SyncedCategory, SyncedCourse, SyncedItem, SyncPayload } from '../types'
+import type {
+  GradeCut,
+  ItemStatus,
+  SioCourse,
+  SioQpa,
+  SioSemester,
+  SyllabusDoc,
+  SyncedCategory,
+  SyncedCourse,
+  SyncedItem,
+  SyncPayload,
+} from '../types'
 import { AUTOLAB_ORIGIN, CANVAS_ORIGIN, GRADESCOPE_ORIGIN } from './brand'
 import { termSortKey } from './courseNumber'
 
@@ -23,6 +34,11 @@ const MAX_SYLLABUS_DOCS = 5 // per course: syllabus page, home page and a few sy
 const MAX_SYLLABUS_TEXT = 200_000 // characters of text per document (the app keeps at most 60 KB per course)
 const MAX_PDF_BASE64 = 4 * 1024 * 1024 // characters of base64 per PDF (about 3 MB of PDF)
 const SYLLABUS_SOURCES: SyllabusDoc['source'][] = ['canvas-syllabus', 'canvas-front-page', 'canvas-file']
+const MAX_SEMESTERS = 40 // SIO semesters (a long CMU career has about 12)
+const MAX_SIO_COURSES = 30 // per semester
+
+const KINDS: SyncPayload['kind'][] = ['canvas', 'gradescope', 'autolab', 'sio']
+type CourseKind = Exclude<SyncPayload['kind'], 'sio'> // the kinds that carry courses
 
 const STATUSES: ItemStatus[] = ['graded', 'submitted', 'ungraded', 'missing', 'unsubmitted', 'excused']
 const ALLOWED_HOSTS = [new URL(CANVAS_ORIGIN).host, new URL(GRADESCOPE_ORIGIN).host, new URL(AUTOLAB_ORIGIN).host]
@@ -113,35 +129,16 @@ export function fromBase64Url(s: string): Uint8Array {
 
 /** Rebuild a clean SyncPayload from untrusted data. Throws if it is not a sync payload at all. */
 export function validatePayload(x: unknown): SyncPayload {
-  if (!isObject(x) || x.v !== 1 || (x.kind !== 'canvas' && x.kind !== 'gradescope' && x.kind !== 'autolab')) {
+  if (!isObject(x) || x.v !== 1 || !KINDS.includes(x.kind as SyncPayload['kind'])) {
     throw new Error('This sync link is not from a supported version. Drag the new Sync button from Setup.')
   }
-  const kind = x.kind
+  const kind = x.kind as SyncPayload['kind']
   const at = str(x.at, 40) ?? new Date().toISOString()
   const ours: string[] = [] // warnings about what we cut here
 
-  let rawCourses = arr(x.courses)
-  if (rawCourses.length > MAX_COURSES) {
-    // Keep the newest terms (the ones the dashboard shows). sort is stable, so same-term courses keep their order.
-    const termOf = (c: unknown) => termSortKey(isObject(c) && typeof c.term === 'string' ? c.term : null)
-    rawCourses = [...rawCourses].sort((a, b) => termOf(b) - termOf(a))
-    ours.push(`Only the first ${MAX_COURSES} of ${rawCourses.length} courses were kept (newest terms first).`)
-    rawCourses = rawCourses.slice(0, MAX_COURSES)
-  }
-
-  const courses: SyncedCourse[] = []
-  let itemBudget = MAX_TOTAL_ITEMS // shrinks as courses use it up
-  let unreadable = 0
-  for (const c of rawCourses) {
-    const clean = cleanCourse(c, kind, at, itemBudget, ours)
-    if (!clean) {
-      unreadable++
-      continue
-    }
-    itemBudget -= clean.items.length
-    courses.push(clean)
-  }
-  if (unreadable > 0) ours.push(`${plural(unreadable, 'course')} could not be read and ${unreadable === 1 ? 'was' : 'were'} skipped.`)
+  // SIO payloads carry semesters instead of courses.
+  const courses = kind === 'sio' ? [] : cleanCourses(x.courses, kind, at, ours)
+  const semesters = kind === 'sio' ? cleanSioSemesters(x.semesters, ours) : null
 
   const theirs = arr(x.warnings)
     .map((w) => str(w, MAX_NAME))
@@ -153,14 +150,49 @@ export function validatePayload(x: unknown): SyncPayload {
     .map((id) => str(id, 100))
     .filter(notNull)
     .slice(0, MAX_FAILED_IDS)
-  return { v: 1, kind, at, courses, warnings, ...(failedIds.length > 0 ? { failedIds } : {}) }
+  return {
+    v: 1,
+    kind,
+    at,
+    courses,
+    ...(semesters ? { semesters } : {}),
+    warnings,
+    ...(failedIds.length > 0 ? { failedIds } : {}),
+  }
+}
+
+/** Clean courses within the limits; anything cut or unreadable is reported in `warnings`. */
+function cleanCourses(x: unknown, kind: CourseKind, at: string, warnings: string[]): SyncedCourse[] {
+  let rawCourses = arr(x)
+  if (rawCourses.length > MAX_COURSES) {
+    // Keep the newest terms (the ones the dashboard shows). sort is stable, so same-term courses keep their order.
+    const termOf = (c: unknown) => termSortKey(isObject(c) && typeof c.term === 'string' ? c.term : null)
+    rawCourses = [...rawCourses].sort((a, b) => termOf(b) - termOf(a))
+    warnings.push(`Only the first ${MAX_COURSES} of ${rawCourses.length} courses were kept (newest terms first).`)
+    rawCourses = rawCourses.slice(0, MAX_COURSES)
+  }
+
+  const courses: SyncedCourse[] = []
+  let itemBudget = MAX_TOTAL_ITEMS // shrinks as courses use it up
+  let unreadable = 0
+  for (const c of rawCourses) {
+    const clean = cleanCourse(c, kind, at, itemBudget, warnings)
+    if (!clean) {
+      unreadable++
+      continue
+    }
+    itemBudget -= clean.items.length
+    courses.push(clean)
+  }
+  if (unreadable > 0) warnings.push(`${plural(unreadable, 'course')} could not be read and ${unreadable === 1 ? 'was' : 'were'} skipped.`)
+  return courses
 }
 
 /**
  * One clean course, or null when it has no sourceId. `itemBudget` is how many items are still allowed across
  * the whole payload; anything cut is reported in `warnings`.
  */
-function cleanCourse(c: unknown, kind: SyncPayload['kind'], at: string, itemBudget: number, warnings: string[]): SyncedCourse | null {
+function cleanCourse(c: unknown, kind: CourseKind, at: string, itemBudget: number, warnings: string[]): SyncedCourse | null {
   if (!isObject(c)) return null
   const sourceId = str(c.sourceId, 100)
   if (!sourceId) return null // merge keys depend on it, so a course without one is useless
@@ -291,6 +323,85 @@ function cleanScheme(s: unknown): GradeCut[] | null {
     if (letter && min !== null) cuts.push({ letter, min })
   }
   return cuts.length ? cuts.sort((a, b) => b.min - a.min) : null
+}
+
+// ---------------------------------------------------------------- SIO semesters
+
+/**
+ * Clean SIO semesters from untrusted data (a sync payload or a saved store): each semester once, with a short
+ * alphanumeric code and a real term name; courses and QPA numbers field by field, numbers only inside sane ranges.
+ * Anything cut is reported in `warnings` when given.
+ */
+export function cleanSioSemesters(x: unknown, warnings: string[] = []): SioSemester[] {
+  const raw = arr(x)
+  if (raw.length > MAX_SEMESTERS) warnings.push(`Only the first ${MAX_SEMESTERS} of ${raw.length} SIO semesters were kept.`)
+  const out: SioSemester[] = []
+  for (const s of raw.slice(0, MAX_SEMESTERS)) {
+    if (!isObject(s)) continue
+    const code = str(s.code, 10)
+    const term = str(s.term, 60)
+    if (!code || !/^[A-Za-z0-9]+$/.test(code) || !term || termSortKey(term) < 0) continue
+    if (out.some((o) => o.code === code)) continue
+    const rawCourses = arr(s.courses)
+    if (rawCourses.length > MAX_SIO_COURSES) warnings.push(`${term}: only the first ${MAX_SIO_COURSES} SIO courses were kept.`)
+    out.push({
+      code,
+      term,
+      level: s.level === 'grad' ? 'grad' : 'undergrad',
+      courses: rawCourses.slice(0, MAX_SIO_COURSES).map(cleanSioCourse).filter(notNull),
+      qpa: cleanSioQpa(s.qpa),
+    })
+  }
+  return out
+}
+
+function cleanSioCourse(c: unknown): SioCourse | null {
+  if (!isObject(c)) return null
+  const title = str(c.title, MAX_NAME) ?? ''
+  const number = courseNumber(c.number)
+  if (!title && !number) return null
+  return {
+    title,
+    number,
+    alsoNumbers: arr(c.alsoNumbers)
+      .map(courseNumber)
+      .filter(notNull)
+      .slice(0, 10),
+    section: shortCode(c.section),
+    gradeOption: shortCode(c.gradeOption),
+    units: inRange(c.units, 0, 100),
+    midGrade: gradeLetter(c.midGrade),
+    finalGrade: gradeLetter(c.finalGrade),
+  }
+}
+
+function cleanSioQpa(q: unknown): SioQpa {
+  const o = isObject(q) ? q : {}
+  return {
+    midSemQpa: inRange(o.midSemQpa, 0, 5),
+    unitsCarried: inRange(o.unitsCarried, 0, 2000),
+    unitsPassed: inRange(o.unitsPassed, 0, 2000),
+    factorableUnits: inRange(o.factorableUnits, 0, 2000),
+    qualityPoints: inRange(o.qualityPoints, 0, 10000),
+    finalQpa: inRange(o.finalQpa, 0, 5),
+    cumulativeQpa: inRange(o.cumulativeQpa, 0, 5),
+  }
+}
+
+/** A grade like "A", "B+", "P" or "AD"; anything else is null. */
+function gradeLetter(x: unknown): string | null {
+  return typeof x === 'string' && /^[A-Z]{1,3}[+-]?$/.test(x) ? x : null
+}
+
+/** A short code like a grade option ("L", "P") or a section ("F", "A1"); anything else is null. */
+function shortCode(x: unknown): string | null {
+  return typeof x === 'string' && /^[A-Za-z0-9]{1,4}$/.test(x) ? x : null
+}
+
+/** A number from min to max, else null. */
+function inRange(x: unknown, min: number, max: number): number | null {
+  const n = num(x)
+  return n !== null && n >= min && n <= max ? n : null
 }
 
 // ---------------------------------------------------------------- small coercion helpers

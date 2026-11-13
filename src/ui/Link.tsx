@@ -3,14 +3,15 @@
 // middle-click / Cmd-click still open a new tab) that switches the view in place on a plain click.
 import type { MouseEvent, ReactNode } from 'react'
 
-export type View = 'home' | 'setup' | 'privacy'
+export type View = 'home' | 'setup' | 'privacy' | 'past'
 export type Navigate = (view: View) => void
 
-export const VIEW_PATHS: Record<View, string> = { home: '/', setup: '/setup', privacy: '/privacy' }
+export const VIEW_PATHS: Record<View, string> = { home: '/', setup: '/setup', privacy: '/privacy', past: '/past' }
 
 export function viewFromPath(path: string): View {
   if (path.startsWith('/setup')) return 'setup'
   if (path.startsWith('/privacy')) return 'privacy'
+  if (path.startsWith('/past')) return 'past'
   return 'home'
 }
 

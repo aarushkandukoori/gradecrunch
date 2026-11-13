@@ -24,6 +24,11 @@
         password, and it only reads these pages when the GradeCrunch site asks it to sync.
       </p>
       <p>
+        On SIO (<b>s3.andrew.cmu.edu</b>) it reads your Grades and QPA page: each semester's courses, units, grade
+        option (letter or pass/fail), mid-semester and final grades, and your official QPA. That gives exact units and
+        your past semesters.
+      </p>
+      <p>
         It also reads each class's syllabus on Canvas (the Syllabus page, the home page and syllabus PDFs), because the
         real grading weights are often only written there. Canvas stores PDFs on <b>inscloudgate.net</b>, so reading
         them needs one more permission, which Chrome asks for when you click Continue.
@@ -31,9 +36,13 @@
 
       <h2>Where it goes</h2>
       <p>
-        Only to the GradeCrunch site open in your own browser. It is never sent to a server. Nothing is sold or shared
-        with anyone. The extension keeps a copy of your last successful sync in its own storage on this computer;
-        removing the extension deletes it.
+        Only to the GradeCrunch site open in your own browser, which saves it there. The extension never sends it to a
+        server, and nothing is sold. The extension keeps a copy of your last successful sync in its own storage on this
+        computer; removing the extension deletes it.
+      </p>
+      <p>
+        The site has an optional AI advisor, a chat about your grades. Only if you use it, your question and a summary
+        of your grades go through the GradeCrunch server to OpenAI to get an answer. GradeCrunch keeps none of it.
       </p>
       <p>
         GradeCrunch's use of this information follows the

@@ -67,11 +67,11 @@ const canvasCourses: SyncedCourse[] = [
     weighted: true,
     categories: [cat('h1', 'Papers', 60), cat('h2', 'Reading Responses', 20), cat('h3', 'Participation', 20)],
     items: [
-      ...items('h1', [['Paper 1: Summary', 88, 100, '09-20'], ['Paper 2: Analysis', 91, 100, '10-18'], ['Paper 3: Argument', null, 100, '12-04']], 'a'),
+      ...items('h1', [['Paper 1: Summary', 88, 100, '09-20'], ['Paper 2: Analysis', 85, 100, '10-18'], ['Paper 3: Argument', null, 100, '12-04']], 'a'),
       ...items('h2', [['Response 1', 10, 10, '09-08'], ['Response 2', 9, 10, '09-22'], ['Response 3', 10, 10, '10-06'], ['Response 4', 8, 10, '10-27']], 'r'),
       ...items('h3', [['Participation (midpoint)', 18, 20, '10-15']], 'q'),
     ],
-    canvasScore: 90.2,
+    canvasScore: 88.4,
   }),
   course('canvas', 'demo-c3', '36200', '36-200 Reasoning with Data', {
     weighted: true,
@@ -90,7 +90,7 @@ const gradescopeCourses: SyncedCourse[] = [
   course('gradescope', 'demo-g1', '21127', 'Concepts of Mathematics', {
     items: [
       ...items(null, [['HW 1', 46, 50, '09-05'], ['HW 2', 50, 50, '09-12'], ['HW 3', 41, 50, '09-19'], ['HW 4', 44, 50, '09-26'], ['HW 5', 48, 50, '10-10']], 'x'),
-      ...items(null, [['Midterm 1', 84, 100, '10-02']], 'y'),
+      ...items(null, [['Midterm 1', 88, 100, '10-02']], 'y'),
       { id: 'y2', name: 'Midterm 2', categoryId: null, score: null, max: null, status: 'ungraded', due: null, omit: false, url: null },
       { id: 'x6', name: 'HW 6', categoryId: null, score: null, max: null, status: 'submitted', due: '2026-11-14T23:59:00-05:00', omit: false, url: null },
     ],

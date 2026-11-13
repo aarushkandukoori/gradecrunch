@@ -6,10 +6,14 @@
 // sends one message, collects the answers until the final one, then closes the port.
 //
 // Everything takes the `chrome` object as a parameter so the tests can pass a fake one.
+import { version as manifestVersion } from '../../extension/manifest.json'
 import {
+  ALL_SOURCES,
+  DEV_EXTENSION_ID,
   EXT_PORT_NAME,
   KNOWN_EXTENSION_IDS,
   LOGIN_URLS,
+  SOURCES_1_0,
   type ExtProgress,
   type ExtRequest,
   type ExtResponse,
@@ -140,6 +144,7 @@ export interface ExtensionInfo {
   id: string
   version: string
   consent: boolean // false until the student clicked Continue on the extension's welcome page
+  sources?: ExtSource[] // the sites it can sync; missing for version 1.0.0 (Canvas, Gradescope, Autolab)
 }
 
 /** Finds the installed extension: says 'hello' to each known id in turn. null when none answers. */
@@ -152,7 +157,11 @@ export async function detectExtension(
   for (const id of ids) {
     try {
       const answer = await request(chrome, id, { type: 'hello' }, timeoutMs)
-      if (answer.type === 'hello') return { id, version: String(answer.version).slice(0, 20), consent: answer.consent === true }
+      if (answer.type === 'hello') {
+        const info: ExtensionInfo = { id, version: String(answer.version).slice(0, 20), consent: answer.consent === true }
+        if (Array.isArray(answer.sources)) info.sources = ALL_SOURCES.filter((s) => answer.sources?.includes(s))
+        return info
+      }
     } catch {
       // not installed under this id (or asleep too long): try the next one
     }
@@ -182,12 +191,66 @@ export async function openExtensionWelcome(id: string, chrome: ChromeLike | unde
   await request(chrome, id, { type: 'openWelcome' }, HELLO_TIMEOUT_MS)
 }
 
+/** Asks the unpacked dev build to reload itself (the store build says no). Rejects when it refuses. */
+export async function reloadExtension(id: string, chrome: ChromeLike | undefined = browserChrome()): Promise<void> {
+  const answer = await request(chrome, id, { type: 'reload' }, HELLO_TIMEOUT_MS)
+  if (answer.type === 'error') throw new Error(String(answer.message).slice(0, 300))
+}
+
+// ---------------------------------------------------------------- keeping the dev build up to date
+
+/** The extension version this website was built with (from extension/manifest.json). */
+export const EXTENSION_VERSION: string = manifestVersion
+
+/** True when version `a` is older than `b` ("1.0.0" < "1.1.0" < "1.10.0"). */
+export function olderVersion(a: string, b: string): boolean {
+  const pa = a.split('.').map((n) => Number(n) || 0)
+  const pb = b.split('.').map((n) => Number(n) || 0)
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i] ?? 0
+    const y = pb[i] ?? 0
+    if (x !== y) return x < y
+  }
+  return false
+}
+
+/**
+ * The unpacked dev build runs older code than this website expects: its files were rebuilt (npm run build:extension)
+ * but Chrome keeps running the old ones until the extension reloads. The App then sends 'reload' once, so the student
+ * never has to click Reload at chrome://extensions. The store build updates itself, so it is never asked.
+ */
+export function needsReload(info: ExtensionInfo, expected = EXTENSION_VERSION): boolean {
+  return info.id === DEV_EXTENSION_ID && olderVersion(info.version, expected)
+}
+
+// The version the site last asked the dev build to reload from, in this tab (sessionStorage). The App asks once per
+// version: when a reload doesn't help (the files on disk are just as old, say `npm run build:extension` wasn't run),
+// asking again on every page load would only restart the extension each time. A new tab asks once more.
+export const DEV_RELOAD_KEY = `${APP_SLUG}:devReloadTried`
+
+export function reloadTried(version: string): boolean {
+  try {
+    return sessionStorage.getItem(DEV_RELOAD_KEY) === version
+  } catch {
+    return false // storage blocked: ask (it is only the dev build)
+  }
+}
+
+export function markReloadTried(version: string): void {
+  try {
+    sessionStorage.setItem(DEV_RELOAD_KEY, version)
+  } catch {
+    // blocked storage: ignore
+  }
+}
+
 // ---------------------------------------------------------------- one object for the App (so tests can swap it)
 
 export interface ExtensionClient {
   detect(): Promise<ExtensionInfo | null>
   sync(id: string, sources: ExtSource[], onProgress: (p: ExtProgress) => void): Promise<ExtSyncResult>
   openWelcome(id: string): Promise<void>
+  reload?(id: string): Promise<void> // dev build only (see needsReload)
 }
 
 /** The real client: looks up `chrome` at call time. */
@@ -195,18 +258,17 @@ export const browserExtension: ExtensionClient = {
   detect: () => detectExtension(browserChrome()),
   sync: (id, sources, onProgress) => syncWithExtension(id, sources, onProgress, browserChrome()),
   openWelcome: (id) => openExtensionWelcome(id, browserChrome()),
+  reload: (id) => reloadExtension(id, browserChrome()),
 }
 
 // ---------------------------------------------------------------- checking what came back
-
-const SOURCES: ExtSource[] = ['canvas', 'gradescope', 'autolab']
 
 /** Keeps only well-formed results. The payloads stay `unknown`: the App runs each through validatePayload. */
 function cleanResults(x: unknown): ExtSourceResult[] {
   if (!Array.isArray(x)) return []
   const out: ExtSourceResult[] = []
   for (const r of x) {
-    if (!r || typeof r !== 'object' || !SOURCES.includes(r.source)) continue
+    if (!r || typeof r !== 'object' || !ALL_SOURCES.includes(r.source)) continue
     const source = r.source as ExtSource
     if (r.status === 'ok') out.push({ source, status: 'ok', payload: r.payload })
     else if (r.status === 'login') out.push({ source, status: 'login', loginUrl: safeLoginUrl(source, r.loginUrl) })
@@ -231,7 +293,7 @@ export function safeLoginUrl(source: ExtSource, url: unknown): string {
 
 // ---------------------------------------------------------------- small helpers the App uses
 
-export const SITE_NAMES: Record<ExtSource, string> = { canvas: 'Canvas', gradescope: 'Gradescope', autolab: 'Autolab' }
+export const SITE_NAMES: Record<ExtSource, string> = { canvas: 'Canvas', gradescope: 'Gradescope', autolab: 'Autolab', sio: 'SIO' }
 
 export const AUTO_SYNC_AFTER_MS = 10 * 60 * 1000 // auto-sync on load when the newest sync is older than this
 
@@ -244,9 +306,18 @@ export function needsAutoSync(lastSync: Partial<Record<ExtSource, string>>, now:
   return now - Math.max(...times) > AUTO_SYNC_AFTER_MS
 }
 
-/** Canvas and Gradescope always; Autolab (beta) only when it was used before or the setting is on. */
-export function pickSources(hasAutolab: boolean, autolabSetting: boolean): ExtSource[] {
-  return hasAutolab || autolabSetting ? ['canvas', 'gradescope', 'autolab'] : ['canvas', 'gradescope']
+/**
+ * Canvas, Gradescope and SIO always; Autolab (beta) only when it was used before or the setting is on. Only sites the
+ * installed extension can sync: an older version refuses a request that names a site it doesn't know.
+ */
+export function pickSources(hasAutolab: boolean, autolabSetting: boolean, supported: ExtSource[] = ALL_SOURCES): ExtSource[] {
+  const wanted: ExtSource[] = hasAutolab || autolabSetting ? ['canvas', 'gradescope', 'autolab', 'sio'] : ['canvas', 'gradescope', 'sio']
+  return wanted.filter((s) => supported.includes(s))
+}
+
+/** The sites an installed extension can sync (version 1.0.0 doesn't say, and knows no SIO). */
+export function supportedSources(info: ExtensionInfo): ExtSource[] {
+  return info.sources ?? SOURCES_1_0
 }
 
 /** One line under the Sync button: a site that needs a login, or something that went wrong. */

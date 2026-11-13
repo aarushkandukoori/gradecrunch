@@ -1,14 +1,16 @@
 // Tests for the app shell and UI fixes: syncing between tabs, Undo after a sync, old #sync links, the
 // postMessage receiver, what-if labels, the item row (what-if box, pencil focus, More menu), the course detail
 // (weights reset, cutoffs, final letter, remove), the class page routing (/class/<key>), toasts, the Sync
-// popover, QPA extras in Settings, and the Ask Claude text.
+// popover, QPA extras in Settings, the P/F button on the class list, and the AI advisor wiring (header button, class
+// page link, Settings, delete).
 // All data is synthetic.
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { applyPayload, defaultStore, saveStore, STORE_KEY } from '../src/lib/store'
+import { applyPayload, defaultStore, loadDemo, saveStore, STORE_KEY } from '../src/lib/store'
+import { demoPayloads } from '../src/lib/demo'
 import { encodePayload } from '../src/lib/payload'
-import { buildClaudePrompt } from '../src/lib/askClaude'
+import { CHAT_KEY, CONSENT_KEY, MEMORY_KEY, saveChat, saveNotes } from '../src/lib/chat/memory'
 import { activeWhatIfs, whatIfApplies, withoutWhatIfs } from '../src/lib/whatIfs'
 import { MAX_PAYLOAD_CHARS, READY_TRIES, startReceiver, syncLinkIsStale, type ReceiverDeps } from '../src/ui/receive'
 import { ItemRow } from '../src/ui/ItemRow'
@@ -16,7 +18,7 @@ import { CourseDetail } from '../src/ui/CourseDetail'
 import { Toasts, type Toast } from '../src/ui/Toasts'
 import { Header } from '../src/ui/Header'
 import { QpaExtras } from '../src/ui/QpaExtras'
-import { rowHint } from '../src/ui/view'
+import { rowHint, shownLetter } from '../src/ui/view'
 import type {
   Category,
   Course,
@@ -79,6 +81,7 @@ afterEach(() => {
   root = null
   container.remove()
   vi.restoreAllMocks()
+  vi.unstubAllGlobals()
   vi.useRealTimers()
 })
 
@@ -524,23 +527,13 @@ describe('what-ifs are labeled', () => {
     expect(text()).not.toContain('includes what-if scores')
   })
 
-  test('Ask Claude text marks what-ifs and unknown point values', () => {
-    const c = course({ items: [item('hw2', { name: 'HW2' })], prefs: { whatIf: { hw2: 10 } } })
+  test('only what-ifs that change the grade count as active', () => {
+    // HW1 has a real score and the what-if wasn't typed over it, so only HW2's what-if is in the grade.
+    const c = course({
+      items: [item('hw2', { name: 'HW2' }), item('hw1', { name: 'HW1', score: 9, status: 'graded' })],
+      prefs: { whatIf: { hw2: 10, hw1: 5 } },
+    })
     expect(activeWhatIfs(c).map((i) => i.key)).toEqual(['hw2'])
-    const qpa: QpaResult = { rows: [], semesterQpa: 3, factorableUnits: 11, totalUnits: 11, qualityPoints: 33, cumulativeQpa: null, deansList: null }
-    const settings: Settings = { level: 'undergrad', college: null, priorQpa: null, priorUnits: null, term: null, showAll: false }
-    const out = buildClaudePrompt(
-      [c],
-      new Map([[c.key, GRADE]]),
-      new Map([[c.key, [{ letter: 'A', min: 90, needed: null, status: 'unknown' as const }]]]),
-      qpa,
-      settings,
-    )
-    expect(out).toContain('Estimated semester QPA (includes what-if scores): 3.00')
-    expect(out).toContain('With my what-if scores: 84% (B)')
-    expect(out).toContain('What-if scores included (not real): HW2 10 / 10')
-    expect(out).toContain("A: unknown (point values for the rest aren't posted yet)")
-    expect(out).not.toContain('Current:')
   })
 })
 
@@ -967,6 +960,134 @@ describe('class page focus and small flows', () => {
   })
 })
 
+// ---------------------------------------------------------------- P/F on the class list
+
+describe('P/F on the class list', () => {
+  const MATH = 'Fall 2026|21241'
+  const CS = 'Fall 2026|15122'
+
+  /** 21-241 at 84% (a B) and 15-122 at 95% (an A), both from Canvas. */
+  function twoClasses(): Store {
+    const cs = syncedCanvas('2', {
+      number: '15122',
+      title: 'Principles of Imperative Computation',
+      items: [{ id: '31', name: 'HW1', categoryId: '1', score: 95, max: 100, status: 'graded', due: null, omit: false, url: null }],
+    })
+    return applyPayload(defaultStore(), payload([syncedCanvas('1'), cs]))
+  }
+
+  const row = (key: string) => container.querySelector<HTMLButtonElement>(`button.class-row[data-key="${key}"]`)
+  const toggle = (key: string) => container.querySelector<HTMLButtonElement>(`button.class-row[data-key="${key}"] + button.pf-toggle`)
+  const chip = (key: string) => row(key)?.querySelector('.chip')?.textContent
+  const qpa = () => container.querySelector('.qpa-big')?.textContent
+  const spoken = () => container.querySelector('.summary [aria-live="polite"]')?.textContent
+
+  test('one tap counts a class as pass/fail: saved, the chip says P, the QPA leaves it out; another tap clears it', async () => {
+    saveStore(twoClasses())
+    await renderApp()
+    const before = qpa()
+    expect(before).toMatch(/^3\.5\d$/) // a B and an A
+    const spokenBefore = spoken()
+    expect(spokenBefore).toBe(`QPA ${before}, 23 units`) // 11 (21-241) + 12 (15-122)
+    const pf = toggle(MATH)!
+    expect(pf.textContent).toBe('P/F')
+    expect(pf.getAttribute('aria-pressed')).toBe('false')
+    expect(pf.getAttribute('aria-label')).toBe('P/F (pass/fail), 21-241')
+    expect(pf.title).toBe('Count this class as pass/fail, left out of your QPA')
+    expect(chip(MATH)).toBe('B')
+
+    await act(async () => pf.click())
+    expect(savedStore().prefs[MATH]).toEqual({ passFail: true })
+    expect(pf.getAttribute('aria-pressed')).toBe('true')
+    expect(pf.title).toBe('Count the letter grade again')
+    expect(chip(MATH)).toBe('P')
+    expect(row(MATH)!.textContent).toContain('84%') // the percent still shows
+    expect(row(MATH)!.textContent).toContain('Pass/fail')
+    expect(qpa()).toBe('4.00') // only 15-122 counts now
+    expect(spoken()).toMatch(/^QPA 4\.00, \d+ units$/) // what screen readers hear after the tap
+    expect(window.location.pathname).toBe('/') // P/F never opens the class
+    expect(toggle(CS)!.getAttribute('aria-pressed')).toBe('false') // the other class is untouched
+
+    await act(async () => pf.click())
+    expect(savedStore().prefs[MATH]).toBeUndefined() // nothing saved: back to the letter
+    expect(pf.getAttribute('aria-pressed')).toBe('false')
+    expect(chip(MATH)).toBe('B')
+    expect(qpa()).toBe(before)
+    expect(spoken()).toBe(spokenBefore)
+  })
+
+  test('the row button still opens the class, and the class page shows the same setting', async () => {
+    saveStore(twoClasses())
+    await renderApp()
+    expect(container.querySelector('button button')).toBeNull() // never a button inside a button
+    await act(async () => toggle(MATH)!.click())
+    await act(async () => row(MATH)!.click())
+    expect(window.location.pathname).toBe('/class/' + encodeURIComponent(MATH))
+    expect(text()).toContain('From Canvas · 11 units · Pass/fail')
+    expect(container.querySelector('.class-head-grade .chip')?.textContent).toBe('P') // the same letter as on the list
+    const box = [...container.querySelectorAll('label.check')].find((l) => l.textContent?.includes('Taken pass/fail'))
+    expect(box?.querySelector('input')?.checked).toBe(true)
+
+    // Back on the list, focus returns to the row that was opened (not to its P/F).
+    await act(async () => buttonByText('All classes').click())
+    expect(document.activeElement).toBe(row(MATH))
+  })
+
+  test('keyboard: Tab goes from a row to its P/F, a native button that keeps focus when pressed', async () => {
+    saveStore(twoClasses())
+    await renderApp()
+    // The tab order follows the page: each row, then its P/F, then the next row.
+    const tabbable = [...container.querySelectorAll<HTMLElement>('a[href], button, input, select, textarea, [tabindex]')].filter(
+      (el) => el.tabIndex >= 0 && !(el as HTMLButtonElement).disabled,
+    )
+    const order = [row(CS), toggle(CS), row(MATH), toggle(MATH)].map((el) => tabbable.indexOf(el!))
+    expect(order[0]).toBeGreaterThanOrEqual(0)
+    expect(order).toEqual([order[0], order[0] + 1, order[0] + 2, order[0] + 3])
+
+    // A real <button type="button">, so browsers press it with Space and Enter. jsdom doesn't turn keys into clicks,
+    // so a click stands in for the key here.
+    const pf = toggle(MATH)!
+    expect(pf.tagName).toBe('BUTTON')
+    expect(pf.type).toBe('button')
+    pf.focus()
+    await act(async () => pf.click())
+    expect(pf.getAttribute('aria-pressed')).toBe('true')
+    expect(document.activeElement).toBe(pf) // still on P/F after the list re-renders
+  })
+
+  test('a class added by hand with only a title gets P/F too; the hidden list gets none', async () => {
+    const s = twoClasses()
+    s.prefs[CS] = { hidden: true }
+    s.manual = [{ key: 'manual:r1', number: '', title: 'Research', term: 'Fall 2026', percent: 90 }]
+    s.settings.showAll = true
+    saveStore(s)
+    await renderApp()
+    expect(container.querySelectorAll('.class-row')).toHaveLength(3) // 21-241, Research, and 15-122 under Hidden
+    const names = [...container.querySelectorAll('.pf-toggle')].map((b) => b.getAttribute('aria-label'))
+    expect(names).toEqual(['P/F (pass/fail), 21-241', 'P/F (pass/fail), Research'])
+    expect(toggle(CS)).toBeNull()
+
+    // Research counts toward the QPA (9 units by default), so P/F takes it out.
+    const research = toggle('manual:r1')!
+    await act(async () => research.click())
+    expect(savedStore().prefs['manual:r1']).toEqual({ passFail: true })
+    expect(chip('manual:r1')).toBe('P')
+    expect(container.querySelector('.summary .muted')?.textContent).toMatch(/^Estimated QPA · 11 units/) // 21-241 only
+  })
+})
+
+describe('shownLetter', () => {
+  test('a pass/fail class shows P, or N when failing; no grade stays none; a final grade from SIO and letters like W stay', () => {
+    const pf = course({ prefs: { passFail: true } })
+    expect(shownLetter(course(), 'B', 'estimate')).toBe('B')
+    expect(shownLetter(pf, 'B', 'estimate')).toBe('P')
+    expect(shownLetter(pf, null, null)).toBeNull() // no grades yet: the row shows "?", not a pass
+    expect(shownLetter(pf, 'R', 'estimate')).toBe('N')
+    expect(shownLetter(pf, 'W', 'you')).toBe('W')
+    expect(shownLetter(pf, 'A', 'sio-final')).toBe('A')
+  })
+})
+
 describe('rowHint', () => {
   const need = (letter: string, min: number, status: NeededResult['status'], needed: number | null = null): NeededResult => ({
     letter,
@@ -1073,5 +1194,198 @@ describe('syllabus weights in the app', () => {
     await render(createElement(CourseDetail, { course: course({ categories: canvasCats }), grade: GRADE, needed: [], level: 'undergrad', onPrefs: vi.fn() }))
     const line = container.querySelector('.weights-line')!
     expect(line.textContent).toBe('Weights · Homework 40% · Exams 60% · from Canvas')
+  })
+})
+
+// ---------------------------------------------------------------- the AI advisor in the app (the chat itself: chatPanel.test.ts)
+
+describe('AI advisor wiring', () => {
+  function sheet(): HTMLDialogElement {
+    const d = container.querySelector<HTMLDialogElement>('dialog.chat-sheet')
+    if (!d) throw new Error('no chat sheet')
+    return d
+  }
+
+  function openSettings() {
+    return act(async () => container.querySelector<HTMLButtonElement>('button[aria-label="Settings"]')!.click())
+  }
+
+  test('the header AI advisor button and the link under the classes open the chat; Ask Claude is gone', async () => {
+    saveStore(applyPayload(defaultStore(), payload([syncedCanvas('1')])))
+    await renderApp()
+    expect(text()).not.toContain('Claude')
+    expect(sheet().open).toBe(false)
+
+    await act(async () => buttonByText('AI advisor').click())
+    expect(sheet().open).toBe(true)
+    expect(sheet().querySelector('h2')?.textContent?.trim()).toBe('AI advisor')
+    expect(text()).toContain('GradeCrunch keeps nothing on its server.') // the first-use notice comes first
+
+    await act(async () => sheet().querySelector<HTMLButtonElement>('button[aria-label="Close"]')!.click())
+    expect(sheet().open).toBe(false)
+    await act(async () => buttonByText('Ask the AI advisor').click())
+    expect(sheet().open).toBe(true)
+  })
+
+  test('no AI advisor button before there are grades', async () => {
+    await renderApp()
+    expect([...container.querySelectorAll('button')].some((b) => b.textContent?.trim() === 'AI advisor')).toBe(false)
+  })
+
+  test('"Ask the AI advisor about this class" starts the question with that class', async () => {
+    saveStore(applyPayload(defaultStore(), payload([syncedCanvas('1')])))
+    localStorage.setItem(CONSENT_KEY, 'yes') // the notice was accepted before
+    window.history.replaceState(null, '', '/class/' + encodeURIComponent('Fall 2026|21241'))
+    await renderApp()
+    await act(async () => buttonByText('Ask the AI advisor about this class').click())
+    expect(sheet().open).toBe(true)
+    expect(sheet().querySelector('textarea')!.value).toBe('About 21-241: ')
+
+    // Closed without asking, then opened from the top bar: the class start goes away...
+    const close = () => act(async () => sheet().querySelector<HTMLButtonElement>('button[aria-label="Close"]')!.click())
+    await close()
+    await act(async () => buttonByText('AI advisor').click())
+    expect(sheet().querySelector('textarea')!.value).toBe('')
+
+    // ...but a question the student started typing stays.
+    const box = sheet().querySelector('textarea')!
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(box, 'What do I need on the final?')
+      box.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    await close()
+    await act(async () => buttonByText('Ask the AI advisor about this class').click())
+    expect(sheet().querySelector('textarea')!.value).toBe('What do I need on the final?')
+  })
+
+  test('Settings lists what the AI advisor remembers, and Delete everything removes the chat and notes too', async () => {
+    saveStore(applyPayload(defaultStore(), payload([syncedCanvas('1')])))
+    saveNotes([{ id: 'n1', text: 'Taking 21-241 pass/fail', at: '2026-11-12T10:00:00Z' }])
+    saveChat([{ id: 'm1', role: 'user', text: 'Is 21-241 pass/fail?' }])
+    localStorage.setItem(CONSENT_KEY, 'yes')
+    await renderApp()
+    await openSettings()
+    expect(text()).toContain('What the AI advisor remembers')
+    expect(text()).toContain('Taking 21-241 pass/fail')
+    expect(text()).toContain("Removes your grades, settings and the AI advisor's chat and notes from this browser.")
+
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    // The page then reloads. jsdom can't, and prints "Not implemented: navigation to another Document": expected.
+    await act(async () => buttonByText('Delete everything').click())
+    expect(confirm.mock.calls[0][0]).toContain("the AI advisor's chat and notes")
+    for (const k of [STORE_KEY, MEMORY_KEY, CHAT_KEY, CONSENT_KEY]) expect(localStorage.getItem(k), k).toBeNull()
+  })
+
+  /** Types a question into the open chat and sends it. */
+  async function ask(question: string) {
+    const box = sheet().querySelector('textarea')!
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(box, question)
+      box.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    await act(async () => buttonByText('Send').click())
+  }
+
+  /** A fake /api/chat whose first answer (a set_pass_fail call for 21-241) waits until `release()`. */
+  function slowServer() {
+    const call = '{"course":"21-241","on":true}'
+    const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    let release!: () => void
+    const first = new Promise<Response>((resolve) => {
+      release = () =>
+        resolve(json({ text: '', toolCalls: [{ id: 'c1', name: 'set_pass_fail', arguments: call }], items: [{ type: 'function_call', call_id: 'c1', name: 'set_pass_fail', arguments: call }] }))
+    })
+    const fetchMock = vi.fn().mockReturnValueOnce(first).mockImplementation(async () => json({ text: 'Done.', toolCalls: [], items: [] }))
+    vi.stubGlobal('fetch', fetchMock)
+    return { fetchMock, release: () => release() }
+  }
+
+  test('a question still being answered when another tab deletes everything changes nothing', async () => {
+    saveStore(applyPayload(defaultStore(), payload([syncedCanvas('1')])))
+    saveNotes([{ id: 'n1', text: 'Aiming for an A in 21-241', at: '' }])
+    localStorage.setItem(CONSENT_KEY, 'yes')
+    const server = slowServer()
+    await renderApp()
+    await act(async () => buttonByText('AI advisor').click())
+    await ask('Make 21-241 pass/fail')
+    expect(server.fetchMock).toHaveBeenCalledTimes(1) // the answer is on its way
+
+    // Another tab: Settings > Delete everything. This tab gets one storage event per key removed.
+    for (const k of [MEMORY_KEY, CHAT_KEY, CONSENT_KEY, STORE_KEY]) {
+      localStorage.removeItem(k)
+      await act(async () => window.dispatchEvent(new StorageEvent('storage', { key: k, newValue: null })))
+    }
+    expect(text()).toContain('All your CMU grades in one place.')
+
+    server.release() // the AI's tool call arrives anyway
+    await settle()
+    for (const k of [STORE_KEY, MEMORY_KEY, CHAT_KEY]) expect(localStorage.getItem(k), k).toBeNull() // nothing came back
+    expect(server.fetchMock).toHaveBeenCalledTimes(1) // the tool never ran, so no second call
+    expect(text()).toContain('All your CMU grades in one place.')
+  })
+
+  test('a question still being answered when another tab clears the chat makes no change without a receipt', async () => {
+    saveStore(applyPayload(defaultStore(), payload([syncedCanvas('1')])))
+    localStorage.setItem(CONSENT_KEY, 'yes')
+    const server = slowServer()
+    await renderApp()
+    await act(async () => buttonByText('AI advisor').click())
+    await ask('Make 21-241 pass/fail')
+
+    localStorage.removeItem(CHAT_KEY) // Clear chat in another tab
+    await act(async () => window.dispatchEvent(new StorageEvent('storage', { key: CHAT_KEY, newValue: null })))
+    server.release()
+    await settle()
+    expect(JSON.parse(localStorage.getItem(STORE_KEY)!).prefs['Fall 2026|21241']).toBeUndefined()
+    expect(text()).not.toContain('set to pass/fail')
+    expect(localStorage.getItem(CHAT_KEY)).toBeNull()
+  })
+
+  test("leaving the demo forgets the AI advisor's chat and notes about the made-up grades (the consent stays)", async () => {
+    saveStore(loadDemo(defaultStore(), demoPayloads()))
+    saveNotes([{ id: 'n1', text: 'Taking 76-101 pass/fail', at: '' }])
+    saveChat([{ id: 'm1', role: 'user', text: "I'm taking 76-101 pass/fail" }])
+    localStorage.setItem(CONSENT_KEY, 'yes')
+    await renderApp()
+    expect(text()).toContain("I'm taking 76-101 pass/fail")
+
+    await act(async () => buttonByText('Clear sample data').click())
+    expect(localStorage.getItem(MEMORY_KEY)).toBeNull()
+    expect(localStorage.getItem(CHAT_KEY)).toBeNull()
+    expect(localStorage.getItem(CONSENT_KEY)).toBe('yes')
+    expect(text()).not.toContain("I'm taking 76-101 pass/fail")
+  })
+
+  test('a real sync that replaces the demo forgets the demo chat and notes too', async () => {
+    saveStore(loadDemo(defaultStore(), demoPayloads()))
+    saveNotes([{ id: 'n1', text: 'Taking 76-101 pass/fail', at: '' }])
+    saveChat([{ id: 'm1', role: 'user', text: "I'm taking 76-101 pass/fail" }])
+    const encoded = await encodePayload(payload([syncedCanvas('1')]))
+    window.history.replaceState(null, '', `/#sync=${encoded}&bv=1`)
+    await renderApp()
+    await settle()
+    expect(text()).toContain('Synced 1 course from Canvas')
+    expect(localStorage.getItem(MEMORY_KEY)).toBeNull()
+    expect(localStorage.getItem(CHAT_KEY)).toBeNull()
+    expect(text()).not.toContain("I'm taking 76-101 pass/fail")
+  })
+
+  test('notes saved in another tab show up here, and a chat deleted in another tab goes away here too', async () => {
+    saveStore(applyPayload(defaultStore(), payload([syncedCanvas('1')])))
+    saveChat([{ id: 'm1', role: 'user', text: 'An old question' }])
+    localStorage.setItem(CONSENT_KEY, 'yes')
+    await renderApp()
+    expect(text()).toContain('An old question')
+
+    // "Delete everything" in another tab removed the chat: this tab must not keep it (and save it back later).
+    localStorage.removeItem(CHAT_KEY)
+    await act(async () => window.dispatchEvent(new StorageEvent('storage', { key: CHAT_KEY, newValue: null })))
+    expect(text()).not.toContain('An old question')
+    expect(localStorage.getItem(CHAT_KEY)).toBeNull() // and nothing saved back
+
+    localStorage.setItem(MEMORY_KEY, JSON.stringify([{ id: 'n2', text: 'Aiming for an A in 21-241', at: '' }]))
+    await act(async () => window.dispatchEvent(new StorageEvent('storage', { key: MEMORY_KEY })))
+    await openSettings()
+    expect(text()).toContain('Aiming for an A in 21-241')
   })
 })

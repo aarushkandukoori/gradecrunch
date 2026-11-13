@@ -9,19 +9,24 @@
 //  5. guess unknown max points from similar items
 //  5b. grading weights from the syllabus, when we can read them (see syllabus.ts)
 //  6. add hand-made courses
+//  6b. SIO, for terms it has: units, grade option and grades per class, classes SIO doesn't list hidden, and
+//      registered courses with no other data added as classes of their own
 //  7. apply the student's prefs (weights, moves, planned items, units, cutoffs)
 //     Weights, per category: the student's own > the syllabus's (when confidently read) > Canvas's group weights.
+//     Units: the student's own > SIO's > the catalog's > 9.
 //  8. pick a title
 //  9. sort
 import type {
   Category,
   Course,
   CoursePrefs,
+  CourseSio,
   CourseSourceRef,
   GradeCut,
   Item,
   ItemStatus,
   ManualCourse,
+  SioCourse,
   Store,
   SyllabusDoc,
   SyncedCourse,
@@ -31,6 +36,7 @@ import { lookupCourse } from './catalog'
 import { bestCategoryMatch, inferCategory, normalizeName } from './categorize'
 import { DEFAULT_SCHEME_GRAD, DEFAULT_SCHEME_UNDERGRAD } from './cmu'
 import { canonicalTerm, parseCourseNumbers, termSortKey } from './courseNumber'
+import { levelFor, semestersFor, termInProgress } from './sio'
 import { matchDrop, matchWeights, moveTargets, pickSyllabus, type CategoryRef } from './syllabus'
 
 // termSortKey lives in courseNumber.ts (so the payload validator can use it without this file); re-exported
@@ -476,11 +482,24 @@ interface Draft {
   manualPercent: number | null
   weightNote: string | null
   syllabusUsed: { name: string; url: string | null } | null
+  sio: CourseSio | null // what SIO says, for a class in a term SIO has (step 6b)
+}
+
+/**
+ * What SIO implies, filled in where the student set nothing: grade option "P" means pass/fail, and a class SIO
+ * doesn't list is hidden. Anything the student saved (true or false) wins. Returns a copy; saved prefs never change.
+ */
+function withSioDefaults(prefs: CoursePrefs, sio: CourseSio | null): CoursePrefs {
+  if (!sio) return prefs
+  const out = { ...prefs }
+  if (sio.gradeOption === 'P' && out.passFail === undefined) out.passFail = true
+  if (!sio.registered && out.hidden === undefined) out.hidden = true
+  return out
 }
 
 /** Step 7: the student's fixes win over synced data. */
 function applyPrefs(d: Draft, savedPrefs: CoursePrefs, store: Store): Course {
-  const prefs = rekeyPrefs(savedPrefs, d.items)
+  const prefs = withSioDefaults(rekeyPrefs(savedPrefs, d.items), d.sio)
   const weighted = typeof prefs.weighted === 'boolean' ? prefs.weighted : d.weighted
   const weights = prefs.weights && typeof prefs.weights === 'object' ? prefs.weights : {}
 
@@ -534,14 +553,18 @@ function applyPrefs(d: Draft, savedPrefs: CoursePrefs, store: Store): Course {
     }
   }
 
-  // Units: student's number, else the catalog, else 9 (and the UI says "check SIO").
+  // Units: student's number, else SIO's exact units, else the catalog, else 9 (and the UI says "check SIO").
   const customUnits = num(prefs.units)
+  const fromSio = num(d.sio?.units)
   const fromCatalog = d.number ? catalogUnits([d.number, ...d.alsoNumbers]) : null
   let units = DEFAULT_UNITS
   let unitsSource: Course['unitsSource'] = 'default'
   if (customUnits !== null && customUnits >= 0) {
     units = customUnits
     unitsSource = 'custom'
+  } else if (fromSio !== null && fromSio >= 0) {
+    units = fromSio
+    unitsSource = 'sio'
   } else if (fromCatalog !== null) {
     units = fromCatalog
     unitsSource = 'catalog'
@@ -558,7 +581,9 @@ function applyPrefs(d: Draft, savedPrefs: CoursePrefs, store: Store): Course {
     scheme = d.canvasScheme
     schemeSource = 'canvas'
   } else {
-    const fallback = store.settings?.level === 'grad' ? DEFAULT_SCHEME_GRAD : DEFAULT_SCHEME_UNDERGRAD
+    // The term's record decides the scale: the one SIO puts the term in, else the Level setting (sio.ts levelFor).
+    const level = levelFor(store?.sio, d.term, store?.settings?.level === 'grad' ? 'grad' : 'undergrad')
+    const fallback = level === 'grad' ? DEFAULT_SCHEME_GRAD : DEFAULT_SCHEME_UNDERGRAD
     scheme = fallback.map((c) => ({ ...c })) // copy so nobody can change the shared default
     schemeSource = 'default'
   }
@@ -585,6 +610,7 @@ function applyPrefs(d: Draft, savedPrefs: CoursePrefs, store: Store): Course {
     // Notes about syllabus weights only matter while weights are on.
     weightNote: weighted ? d.weightNote : null,
     syllabusUsed: weighted ? d.syllabusUsed : null,
+    sio: d.sio,
   }
 }
 
@@ -712,6 +738,7 @@ function draftFromGroup(g: Group): Draft {
     manualPercent: null,
     weightNote: syllabus ? syllabus.note : null,
     syllabusUsed: syllabus ? { name: str(syllabus.doc.name) || 'Syllabus', url: str(syllabus.doc.url) || null } : null,
+    sio: null,
   }
 }
 
@@ -740,6 +767,113 @@ function draftFromManual(m: ManualCourse): Draft | null {
     manualPercent: num(m.percent),
     weightNote: null,
     syllabusUsed: null,
+    sio: null,
+  }
+}
+
+// ---------------------------------------------------------------- step 6b: SIO (CMU's official record)
+
+/**
+ * Titles compared loosely: "Intro. to Computer Systems" and "intro to computer systems" are the same, and so are
+ * "Art & Machine Learning" and "Art and Machine Learning" (CMU writes cross-listed titles both ways).
+ */
+function titleKey(title: string): string {
+  return title.toLowerCase().replace(/&/g, 'and').replace(/[^a-z0-9]/g, '')
+}
+
+/** What a class gets from the SIO course it matched. */
+function sioInfo(sc: SioCourse): CourseSio {
+  return {
+    registered: true,
+    units: num(sc.units),
+    gradeOption: str(sc.gradeOption) || null,
+    midGrade: str(sc.midGrade) || null,
+    finalGrade: str(sc.finalGrade) || null,
+  }
+}
+
+/** A registered SIO course that no Canvas, Gradescope or hand-added class matched (an independent study, say). */
+function draftFromSio(sc: SioCourse, number: string, term: string, key: string): Draft {
+  const catalog = lookupCourse(number)
+  return {
+    key,
+    number,
+    alsoNumbers: list(sc.alsoNumbers).filter((n) => typeof n === 'string' && n !== number),
+    title: str(sc.title).trim() || catalog?.title || `${number.slice(0, 2)}-${number.slice(2)}`,
+    term,
+    academic: true,
+    sources: [],
+    weighted: false,
+    categories: [],
+    items: [],
+    canvasScore: null,
+    canvasGrade: null,
+    canvasScheme: null,
+    manualPercent: null,
+    weightNote: null,
+    syllabusUsed: null,
+    sio: sioInfo(sc),
+  }
+}
+
+/** A class only typed in by hand (no synced data). */
+function isManualDraft(d: Draft): boolean {
+  return d.sources.length > 0 && d.sources.every((s) => s.source === 'manual')
+}
+
+/**
+ * Step 6b: for every term SIO has, line the classes up with the courses SIO says you are registered for.
+ *  - A class SIO lists (same course number or a cross-listed one; failing that, the same title, for a class whose
+ *    other number only SIO shows) gets SIO's units, grade option and grades.
+ *  - A Canvas, Gradescope or Autolab class SIO doesn't list is marked not registered, so applyPrefs hides it (the
+ *    student can show it again). Hand-added classes are never hidden: the student added them on purpose. (One added
+ *    with no term already has the semester in progress as its term, see buildCourses, so SIO doesn't add it twice.)
+ *  - An SIO course nothing matched becomes a class of its own (an independent study, say), for a term the student
+ *    already has other classes in and for the semester in progress. Not for a finished semester with nothing else
+ *    (the Past semesters page lists those) or for next semester (registered early, nothing to show yet).
+ * A term whose SIO courses have no readable numbers is left alone, so a change to SIO's page can't hide every class.
+ */
+function addSio(drafts: Draft[], store: Store, current: string | null): void {
+  const sio = store?.sio
+  if (!sio || !Array.isArray(sio.semesters)) return
+  const level = store.settings?.level === 'grad' ? 'grad' : 'undergrad'
+  const terms = new Set(sio.semesters.map((s) => canonicalTerm(s?.term)))
+  for (const term of terms) {
+    if (term === null) continue
+    const semesters = semestersFor(sio, term, level)
+    const sioCourses = semesters.flatMap((s) => list(s.courses)).filter((c) => c && typeof c === 'object')
+    if (!sioCourses.some((c) => typeof c.number === 'string')) continue
+
+    const classes = drafts.filter((d) => d.academic && d.term === term)
+    const taken = new Set<SioCourse>() // each SIO course goes to one class
+    const numbersOfSio = (c: SioCourse) => [c.number, ...list(c.alsoNumbers)].filter((n): n is string => typeof n === 'string')
+    for (const d of classes) {
+      const mine = draftNumbers(d)
+      const sc = sioCourses.find((c) => !taken.has(c) && numbersOfSio(c).some((n) => mine.includes(n)))
+      if (sc) {
+        taken.add(sc)
+        d.sio = sioInfo(sc)
+      }
+    }
+    for (const d of classes) {
+      if (d.sio) continue
+      const sc = sioCourses.find((c) => !taken.has(c) && str(c.title) !== '' && titleKey(str(c.title)) === titleKey(d.title))
+      if (sc) {
+        taken.add(sc)
+        d.sio = sioInfo(sc)
+      } else if (!isManualDraft(d)) {
+        d.sio = { registered: false, units: null, gradeOption: null, midGrade: null, finalGrade: null }
+      }
+    }
+
+    if (classes.length === 0 && term !== current) continue
+    for (const sc of sioCourses) {
+      if (taken.has(sc) || typeof sc.number !== 'string') continue
+      // The same number twice (two sections of an independent study, say) gets "#2" so both count.
+      let key = `${term}|${sc.number}`
+      for (let n = 2; drafts.some((d) => d.key === key); n++) key = `${term}|${sc.number}#${n}`
+      drafts.push(draftFromSio(sc, sc.number, term, key))
+    }
   }
 }
 
@@ -780,18 +914,24 @@ function keepSavedKeys(drafts: Draft[], store: Store): void {
   }
 }
 
-/** Synced data + manual courses + prefs -> one Course per class, academic first, then by course number. */
+/** Synced data + manual courses + SIO + prefs -> one Course per class, academic first, then by course number. */
 export function buildCourses(store: Store): Course[] {
   const drafts: Draft[] = groupSynced(store?.synced ?? {}).map(draftFromGroup)
   keepSavedKeys(drafts, store)
   const syncedDrafts = [...drafts]
+  // A class added by hand with no term (on the welcome page, before any sync) belongs to the semester in progress.
+  // With SIO synced, SIO says which semester that is; without it, the class list puts the class in the newest term
+  // (view.ts splitCourses). Giving it the term here also lets the line below catch a class synced since.
+  const current = termInProgress(store?.sio)
   for (const m of list(store?.manual)) {
     const d = draftFromManual(m)
     if (!d || drafts.some((x) => x.key === d.key)) continue
+    if (d.term === null) d.term = current
     // Same class already synced (same term, a shared number): the synced one wins, or QPA counts it twice.
     if (syncedDrafts.some((x) => sameClass(x, d))) continue
     drafts.push(d)
   }
+  addSio(drafts, store, current)
 
   const courses = drafts.map((d) => applyPrefs(d, prefsFor(store, d.key), store))
 

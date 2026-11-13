@@ -1,4 +1,7 @@
-# Cloudflare Pages config. The site is plain static files in dist/ (there is no server code).
+# Cloudflare Pages config. The site is static files in dist/ plus one Pages Function, functions/api/chat.ts
+# (POST /api/chat, the optional AI advisor chat, a stateless pass-through to OpenAI). "wrangler pages deploy dist",
+# run from this folder (scripts/deploy.sh), bundles ./functions with the site. The OpenAI key is the OPENAI_API_KEY
+# secret in the Pages dashboard, never in this file. For local runs, put it in .dev.vars (gitignored).
 name = "gradecrunch"
 pages_build_output_dir = "dist"
 compatibility_date = "2026-11-01"

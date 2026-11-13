@@ -1,7 +1,7 @@
 // Small pure pieces shared by the service worker and the offscreen document: constants, the messages they send each
 // other, and the checks on anything that arrives from outside. No chrome.* calls here, so tests can import it.
 import type { ExtRequest, ExtSource, ExtSourceResult } from '../protocol'
-import { LOGIN_URLS } from '../protocol'
+import { ALL_SOURCES, LOGIN_URLS } from '../protocol'
 import type { SyncPayload } from '../../src/types'
 import { CanvasAuthError, withoutSyllabusPdfs } from '../../src/sync/canvas'
 
@@ -15,7 +15,7 @@ export const OFFSCREEN_PATH = 'offscreen.html'
 export const CONSENT_KEY = 'consent' // true once the student clicked Continue on the welcome page
 export const lastResultKey = (source: ExtSource) => 'last:' + source // last sync result for one site
 
-export const ALL_SOURCES: ExtSource[] = ['canvas', 'gradescope', 'autolab']
+export { ALL_SOURCES } // defined in protocol.ts, which the website shares
 
 /**
  * Canvas keeps uploaded files (syllabus PDFs) on its storage service and redirects downloads there. The extension
@@ -109,6 +109,7 @@ export function parseRequest(x: unknown): ExtRequest | null {
   if (!isObject(x)) return null
   if (x.type === 'hello') return { type: 'hello' }
   if (x.type === 'openWelcome') return { type: 'openWelcome' }
+  if (x.type === 'reload') return { type: 'reload' } // the service worker honors it only in the dev build
   if (x.type === 'sync') {
     if (!Array.isArray(x.sources)) return null
     const asked: unknown[] = x.sources
@@ -122,8 +123,8 @@ export function parseRequest(x: unknown): ExtRequest | null {
 
 // ---------------------------------------------------------------- errors -> results
 
-/** The sync code says "Log in to Canvas first" (and the same for Gradescope / Autolab) when the student is logged out. */
-const LOGIN_MESSAGE = /^Log in to (Canvas|Gradescope|Autolab) first/
+/** The sync code says "Log in to Canvas first" (and the same for Gradescope / Autolab / SIO) when logged out. */
+const LOGIN_MESSAGE = /^Log in to (Canvas|Gradescope|Autolab|SIO) first/
 
 /** Map a failed sync to what the website should do next: send the student to log in, or show the error. */
 export function resultFromError(source: ExtSource, err: unknown): ExtSourceResult {
